@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .config import IngestConfig, load_config
-from .logging_utils import log_summary, set_verbosity, set_quiet
+from .logging_utils import log_summary, set_quiet, set_verbosity
 from .pipeline import IngestPipeline
 from .sources.huggingface import _parse_hf_spec
 
