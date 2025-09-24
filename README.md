@@ -160,20 +160,20 @@ fasttext_lid_path: null
 ### Processing flow
 
 ```mermaid
-flowchart LR
-  A[HF Datasets] --> B
-  A2[HF Repo Crawl] --> B
-  K[Kaggle] --> B
-  G[Git] --> B
-  L[Local] --> B
-  B[Source Readers\n(stream/recursive)] --> C[Normalize]
-  C --> D[Quality Filters\nentropy/length/language]
-  D --> E{Near-dup?}
-  E -- yes --> X[Drop]
-  E -- no --> F[Label Map\n+ Category]
-  F --> S[State Store\nSQLite (batched)]
-  S --> W[Writer\n(orjson JSONL, atomic)]
-  W --> O[unified.jsonl]
+flowchart TB
+  A["HF Datasets"] --> B
+  A2["HF Repo Crawl"] --> B
+  K["Kaggle"] --> B
+  G["Git"] --> B
+  L["Local"] --> B
+  B["Source Readers<br/>(stream/recursive)"] --> C["Normalize"]
+  C --> D["Quality Filters<br/>entropy/length/language"]
+  D --> E{"Near-dup?"}
+  E -->|yes| X["Drop"]
+  E -->|no| F["Label Map<br/>+ Category"]
+  F --> S["State Store<br/>SQLite (batched)"]
+  S --> W["Writer<br/>(orjson JSONL, atomic)"]
+  W --> O["unified.jsonl"]
 ```
 
 #### How it works

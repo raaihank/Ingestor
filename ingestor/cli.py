@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .config import IngestConfig, load_config
-from .logging_utils import log_summary, set_verbosity
+from .logging_utils import log_summary, set_verbosity, set_quiet
 from .pipeline import IngestPipeline
 from .sources.huggingface import _parse_hf_spec
 
@@ -124,6 +124,8 @@ def run(
     is_tty = sys.stderr.isatty() and os.getenv("CI") not in ("1", "true", "True")
     dataset_counts: dict[str, dict[str, int]] = {}
     last_update: dict[str, float] = {}
+    dataset_order: list[str] = []
+    current_ds: str | None = None
     overall_approved = 0
     overall_rejected = 0
 
@@ -132,10 +134,12 @@ def run(
         return str(meta.get("dataset") or o.get("source") or "unknown")
 
     if is_tty:
+        # Suppress dataset log lines during spinner rendering
+        set_quiet(True)
         with Progress(
             SpinnerColumn(spinner_name="line", style="grey50"),
             TextColumn("{task.description}"),
-            TextColumn("[green]approved={task.fields[approved]}[/green] [red]rejected={task.fields[rejected]}[/red]"),
+            TextColumn("[green]approved: {task.fields[approved]}[/green]  [red]rejected: {task.fields[rejected]}[/red]"),
             transient=True,
         ) as progress:
             # Keep a mapping Dataset -> TaskID for typed Progress.update
@@ -154,25 +158,63 @@ def run(
                     overall_approved += 1
                 else:
                     continue
+                if ds not in dataset_order:
+                    dataset_order.append(ds)
+                if current_ds is None:
+                    current_ds = ds
+                elif ds != current_ds and current_ds in tasks:
+                    # Stop animating the previous dataset line
+                    progress.stop_task(tasks[current_ds])
+                    current_ds = ds
                 now = time.time()
                 lu = last_update.get(ds, 0)
                 if now - lu < 0.1:
                     continue
                 last_update[ds] = now
                 if ds not in tasks:
-                    tasks[ds] = progress.add_task(f"[{ds}]", approved=0, rejected=0)
-                progress.update(tasks[ds], description=f"[{ds}]", approved=dataset_counts[ds]["approved"], rejected=dataset_counts[ds]["rejected"])
+                    tasks[ds] = progress.add_task(ds, approved=0, rejected=0)
+                # Stop all other dataset tasks to avoid multiple spinning lines
+                for other_ds, tid in list(tasks.items()):
+                    if other_ds != ds and not progress.tasks[tid].finished:
+                        progress.stop_task(tid)
+                progress.update(
+                    tasks[ds],
+                    description=ds,
+                    approved=dataset_counts[ds]["approved"],
+                    rejected=dataset_counts[ds]["rejected"],
+                )
             for ds, tid in tasks.items():
                 symbol = "[green]\u2713[/green]" if dataset_counts.get(ds, {}).get("rejected", 0) == 0 else "[red]\u2717[/red]"
-                progress.update(tid, description=f"[{ds}] {symbol}", refresh=True)
+                progress.update(tid, description=f"{ds} {symbol}", refresh=True)
+                progress.stop_task(tid)
+        # After progress ends (transient), print final per-dataset summary lines
+        set_quiet(False)
+        console = Console()
+        for ds in dataset_order:
+            counts = dataset_counts.get(ds, {"approved": 0, "rejected": 0})
+            symbol_plain = "\u2713" if counts.get("rejected", 0) == 0 else "\u2717"
+            console.print("")
+            console.print(f"{ds} {symbol_plain} approved: {counts['approved']} rejected: {counts['rejected']}")
     else:
         for outcome in pipeline.run(out_path=out):
             if isinstance(outcome, dict) and outcome.get("event") == "rejected":
+                ds = outcome.get("dataset", "unknown")
+                c = dataset_counts.setdefault(ds, {"approved": 0, "rejected": 0})
+                c["rejected"] += 1
+                if ds not in dataset_order:
+                    dataset_order.append(ds)
                 overall_rejected += 1
             elif isinstance(outcome, dict):
+                ds = get_dataset_id(outcome)
+                c = dataset_counts.setdefault(ds, {"approved": 0, "rejected": 0})
+                c["approved"] += 1
+                if ds not in dataset_order:
+                    dataset_order.append(ds)
                 overall_approved += 1
-        for ds, c in dataset_counts.items():
-            Console().print(f"[{ds}] \u2713 approved: {c['approved']} rejected: {c['rejected']}")
+        console = Console()
+        for ds in dataset_order:
+            c = dataset_counts.get(ds, {"approved": 0, "rejected": 0})
+            console.print(f"{ds} approved: {c['approved']} rejected: {c['rejected']}")
 
     log_summary(approved=overall_approved, rejected=overall_rejected)
     log.info("ingest_complete", total=overall_approved, out=str(out))
