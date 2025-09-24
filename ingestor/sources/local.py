@@ -9,9 +9,10 @@ from typing import Dict, Generator, Iterable
 import pandas as pd  # type: ignore
 import pyarrow.ipc as pa_ipc  # type: ignore
 
+from ..constants import STRUCTURED_EXTENSIONS, TEXT_EXTENSIONS
 from ..schema import extract_text_and_label, infer_split_from_path
 
-DATA_EXTS = {".jsonl", ".ndjson", ".json", ".csv", ".tsv", ".parquet", ".arrow", ".txt"}
+DATA_EXTS = STRUCTURED_EXTENSIONS | TEXT_EXTENSIONS
 
 
 def _iter_paths(pattern: str) -> Iterable[Path]:

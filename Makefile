@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install dev format lint type test build
+.PHONY: install dev format lint type test build setup-fasttext
 
 install:
 	$(PYTHON) -m pip install -e .
@@ -22,4 +22,7 @@ test:
 
 build:
 	$(PYTHON) -m build
+
+setup-fasttext:
+	$(PYTHON) scripts/setup_fasttext.py
 

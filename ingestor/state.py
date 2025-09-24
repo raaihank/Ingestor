@@ -59,6 +59,9 @@ class StateStore:
                 self._batch_buffer,
             )
             cur.execute("COMMIT")
+        except Exception:
+            cur.execute("ROLLBACK")
+            raise
         finally:
             self._batch_buffer.clear()
 

@@ -109,7 +109,12 @@ class LanguageFilter:
                 try:
                     # Loading can be expensive; avoid if file missing.
                     self.model = fasttext.load_model(str(lid_path))  # type: ignore
-                except Exception:
+                except Exception as e:
+                    # Log the failure but continue with fallback
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"Failed to load FastText model from {lid_path}: {e}"
+                    )
                     self.model = None
 
     def is_allowed_language(self, text: str) -> bool:
@@ -118,11 +123,20 @@ class LanguageFilter:
             return False
         # Prefer FastText if available
         if self.model is not None:
-            labels, probs = self.model.predict(text, k=1)  # type: ignore
-            primary_lang = labels[0].replace("__label__", "")
-            primary_conf = float(probs[0])
-            self.last_lang, self.last_conf = primary_lang, primary_conf
-            return primary_lang in self.allowed and primary_conf >= self.confidence
+            try:
+                labels, probs = self.model.predict(text, k=1)  # type: ignore
+                primary_lang = labels[0].replace("__label__", "")
+                primary_conf = float(probs[0])
+                self.last_lang, self.last_conf = primary_lang, primary_conf
+                return primary_lang in self.allowed and primary_conf >= self.confidence
+            except Exception as e:
+                # Handle NumPy compatibility issues or other FastText errors
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"FastText prediction failed: {e}. Falling back to langdetect."
+                )
+                # Disable the model for future calls to avoid repeated errors
+                self.model = None
 
         # Fallback to langdetect
         if detect_langs is not None:

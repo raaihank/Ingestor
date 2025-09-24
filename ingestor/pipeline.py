@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
 import os
 import queue
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Generator, Iterable, Optional
 
@@ -54,13 +54,8 @@ class IngestPipeline:
         # Fast in-run exact dedupe guard to complement SQLite idempotency
         self._seen_triplets: set[tuple[str, str, str]] = set()
 
-    def _build_record_from_normalized(self, item: Dict, normalized: str, prompt_hash: str) -> Optional[Dict]:
-        source = str(item.get("source", "unknown"))
-        source_id = str(item.get("source_id", ""))
-        label = item.get("label")
-        meta = item.get("meta", {})
-        dataset_id = str(meta.get("dataset") or "")
-
+    def _normalize_label_and_inject_category(self, label, meta: Dict, dataset_id: str) -> tuple:
+        """Extract and normalize label, inject category into meta if needed."""
         # Apply label normalization maps (dataset-specific overrides then global)
         if label is not None:
             try:
@@ -88,6 +83,17 @@ class IngestPipeline:
                 cat = self.config.kaggle_overrides[dataset_id].category
             if cat:
                 meta["category"] = cat
+        
+        return label, meta
+
+    def _build_record_from_normalized(self, item: Dict, normalized: str, prompt_hash: str) -> Optional[Dict]:
+        source = str(item.get("source", "unknown"))
+        source_id = str(item.get("source_id", ""))
+        label = item.get("label")
+        meta = item.get("meta", {})
+        dataset_id = str(meta.get("dataset") or "")
+
+        label, meta = self._normalize_label_and_inject_category(label, meta, dataset_id)
 
         if not self._passes_quality(normalized, meta):
             return None
@@ -120,7 +126,7 @@ class IngestPipeline:
     def _iter_sources(self) -> Iterable[Dict]:
         for hf_ds in self.config.hf:
             log_dataset(f"Loading HF dataset: {hf_ds}")
-            yield from iter_huggingface(hf_ds)
+            yield from iter_huggingface(hf_ds, self.config)
         for repo in self.config.git:
             log_dataset(f"Loading Git repo: {repo}")
             yield from iter_git_repo(repo)
@@ -161,31 +167,7 @@ class IngestPipeline:
         meta = item.get("meta", {})
         dataset_id = str(meta.get("dataset") or "")
 
-        # Apply label normalization maps (dataset-specific overrides then global)
-        if label is not None:
-            try:
-                label_str = str(label)
-                mapped = None
-                if dataset_id and dataset_id in self.config.hf_label_maps:
-                    mapped = self.config.hf_label_maps[dataset_id].get(label_str, None)
-                if mapped is None and dataset_id and dataset_id in self.config.kaggle_label_maps:
-                    mapped = self.config.kaggle_label_maps[dataset_id].get(label_str, None)
-                if mapped is None:
-                    mapped = self.config.global_label_map.get(label_str, None)
-                if mapped is not None:
-                    label = mapped
-            except Exception:
-                pass
-
-        # Inject category from overrides
-        if dataset_id and "category" not in meta:
-            cat = None
-            if dataset_id in self.config.hf_overrides and self.config.hf_overrides[dataset_id].category:
-                cat = self.config.hf_overrides[dataset_id].category
-            if dataset_id in self.config.kaggle_overrides and self.config.kaggle_overrides[dataset_id].category:
-                cat = self.config.kaggle_overrides[dataset_id].category
-            if cat:
-                meta["category"] = cat
+        label, meta = self._normalize_label_and_inject_category(label, meta, dataset_id)
 
         if not self._passes_quality(normalized, meta):
             return None
@@ -231,7 +213,7 @@ class IngestPipeline:
 
         def _produce_hf(spec: str) -> None:
             try:
-                for it in iter_huggingface(spec):
+                for it in iter_huggingface(spec, self.config):
                     q.put(it)
             finally:
                 q.put(SENTINEL)

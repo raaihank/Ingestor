@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
+import platform
 import sys
 import time
 from pathlib import Path
 from typing import List, Optional
-import platform
 
 import structlog
 import typer
@@ -278,15 +278,11 @@ def verify(
     def normalize_label(dataset_id: str, raw_label: object) -> str:
         if raw_label is None:
             return "<none>"
-        s = str(raw_label)
-        mapped = None
-        if dataset_id in cfg.hf_label_maps:
-            mapped = cfg.hf_label_maps[dataset_id].get(s)
-        if mapped is None and dataset_id in cfg.kaggle_label_maps:
-            mapped = cfg.kaggle_label_maps[dataset_id].get(s)
-        if mapped is None:
-            mapped = cfg.global_label_map.get(s)
-        return mapped or s
+        # Reuse pipeline's label normalization logic
+        normalized_label, _ = pipeline._normalize_label_and_inject_category(
+            raw_label, {}, dataset_id
+        )
+        return str(normalized_label) if normalized_label is not None else "<none>"
 
     for item in pipeline._iter_sources():  # type: ignore[attr-defined]
         meta = item.get("meta", {})
@@ -402,6 +398,6 @@ def tune(
         f"io-workers={io_workers} cpu-workers={cpu_workers} batch-size={batch_size}"
     )
 
+
 if __name__ == "__main__":
     app()
-

@@ -12,10 +12,8 @@ from typing import Dict, Generator, Optional
 import pandas as pd  # type: ignore
 import pyarrow.ipc as pa_ipc  # type: ignore
 
+from ..constants import TEXT_EXTENSIONS
 from ..schema import extract_text_and_label
-
-TEXT_EXTENSIONS = {".txt", ".md", ".rst"}
-STRUCTURED_EXTENSIONS = {".jsonl", ".ndjson", ".json", ".csv", ".parquet"}
 
 
 def _unzip_all(root: Path) -> None:

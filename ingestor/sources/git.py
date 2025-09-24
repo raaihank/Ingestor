@@ -11,12 +11,12 @@ import pandas as pd  # type: ignore
 import pyarrow.ipc as pa_ipc  # type: ignore
 from git import Repo
 
-TEXT_EXTENSIONS = {".txt", ".md", ".rst", ".csv", ".tsv", ".json", ".yaml", ".yml", ".jsonl", ".ndjson", ".parquet", ".arrow"}
+from ..constants import ALL_SUPPORTED_EXTENSIONS
 
 
 def _iter_text_files(root: Path) -> Iterable[Path]:
     for path in root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in TEXT_EXTENSIONS:
+        if path.is_file() and path.suffix.lower() in ALL_SUPPORTED_EXTENSIONS:
             yield path
 
 

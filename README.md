@@ -132,6 +132,29 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
   - manual override via `--batch-size N`
 - Use `ingestor tune` to see suggestions per machine; add `--sample data/unified.jsonl` for tighter batch estimates.
 
+### Language Detection Optimization
+
+For faster language detection, install the FastText model:
+
+```bash
+make setup-fasttext
+# or
+python scripts/setup_fasttext.py
+```
+
+This downloads the FastText language identification model (~125MB) which provides:
+- **10-100x faster** language detection vs. langdetect fallback
+- **Higher accuracy** on short texts and technical content
+- **Better handling** of mixed-language content
+
+The setup script:
+- Shows download progress and verifies file integrity
+- Tests model compatibility and handles NumPy version issues
+- Provides clear feedback on setup status
+- Supports custom model locations via `FASTTEXT_LID_PATH` environment variable
+
+Without FastText, the system gracefully falls back to langdetect (slower but functional).
+
 ### Troubleshooting
 
 - HF gated datasets: accept terms once in web UI, then set `HF_TOKEN`
