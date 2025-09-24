@@ -1,3 +1,8 @@
+<!-- Badges -->
+[![Build](https://github.com/raaihank/ingestor/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/raaihank/ingestor/actions/workflows/build.yml)
+[![Test](https://github.com/raaihank/ingestor/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/raaihank/ingestor/actions/workflows/test.yml)
+[![Security](https://github.com/raaihank/ingestor/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/raaihank/ingestor/actions/workflows/security.yml)
+
 # Ingestor
 Fast, reproducible dataset ingestion for LLM security and general NLP. Pull from Hugging Face, Kaggle, Git, or local folders; label normalization, filter, dedupe, and write atomic JSONL.
 

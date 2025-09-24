@@ -21,8 +21,8 @@ jobs:
       matrix:
         python-version: ["3.9", "3.11"]
         include:
-          - python-version: "3.13"
-            experimental: true
+          - python-version: "3.11"
+            experimental: false
     continue-on-error: ${{ matrix.experimental || false }}
 
     env:
