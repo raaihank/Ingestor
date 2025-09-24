@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import logging
 from rich.console import Console
 
 _VERBOSITY = 0  # 0,1,2
 _console = Console()
 _QUIET = False
+
+
+def _suppress_huggingface_logging() -> None:
+    """Suppress verbose HuggingFace datasets logging messages."""
+    # Suppress datasets library verbose messages
+    logging.getLogger("datasets").setLevel(logging.ERROR)
+    logging.getLogger("datasets.builder").setLevel(logging.ERROR)
+    logging.getLogger("datasets.info").setLevel(logging.ERROR)
+    logging.getLogger("datasets.utils").setLevel(logging.ERROR)
+    logging.getLogger("datasets.arrow_dataset").setLevel(logging.ERROR)
+    logging.getLogger("datasets.dataset_dict").setLevel(logging.ERROR)
 
 
 def set_verbosity(level: int) -> None:
@@ -14,6 +26,10 @@ def set_verbosity(level: int) -> None:
     if level > 2:
         level = 2
     _VERBOSITY = level
+    
+    # Always suppress HuggingFace verbose logging unless in debug mode
+    if level < 2:
+        _suppress_huggingface_logging()
 
 
 def set_quiet(quiet: bool) -> None:

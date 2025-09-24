@@ -160,8 +160,9 @@ Without FastText, the system gracefully falls back to langdetect (slower but fun
 - HF gated datasets: accept terms once in web UI, then set `HF_TOKEN`
 - Kaggle: set `KAGGLE_USERNAME`/`KAGGLE_KEY` (or `~/.kaggle/kaggle.json` with 600 perms)
 - Missing columns: use `*_overrides` to set `text_column`/`label_column`, then re‑run `ingestor verify`
+- FastText NumPy compatibility: The project pins NumPy <2.0 for FastText compatibility. If you encounter NumPy 2.x issues, reinstall with `pip install -e .`
 
-Default logging shows a spinner per dataset with green approved/red rejected counts. Add `--debug` for detailed logs.
+Default logging shows a spinner per dataset with green approved/red rejected counts. HuggingFace dataset loading messages are suppressed for cleaner output. Add `--debug` for detailed logs including HuggingFace verbose messages.
 
 ### Advanced config
 
