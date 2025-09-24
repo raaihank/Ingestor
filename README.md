@@ -81,6 +81,8 @@ export KAGGLE_KEY=...
 
 Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`, `label`, `meta` (and optional `raw`).
 
+> **💡 Resumable Processing**: The ingestor maintains state in `.state/ingest.sqlite` to track processed records. If your processing is interrupted or you need to restart, simply run the same command again - it will automatically resume from where it left off, skipping already processed records. This makes it safe to process large datasets over multiple sessions.
+
 ### Commands
 
 - `ingestor run` — ingest sources to JSONL (flags: `--config`, `--out`, `--store-raw`, `--allowed-lang`, `--language-confidence`, `--enforce-license`, `--hf-token`, `--kaggle-username`, `--kaggle-key`, `--debug`)
@@ -88,6 +90,8 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
 - `ingestor test` — demo on bundled `test-data/`
 - `ingestor version` — show version
  - `ingestor tune` — suggest optimal `io-workers`, `cpu-workers`, and `batch-size` (flags: `--sample`, `--top-n`, `--target-batch-bytes`, `--json`)
+
+> **⚡ Idempotent Operations**: All `ingestor run` commands are idempotent - running the same command multiple times produces the same result. The system tracks processed records by their unique combination of source, source_id, and content hash, ensuring no duplicates even across multiple runs or interrupted sessions.
 
 ### In‑depth configuration
 
@@ -161,6 +165,12 @@ Without FastText, the system gracefully falls back to langdetect (slower but fun
 - Kaggle: set `KAGGLE_USERNAME`/`KAGGLE_KEY` (or `~/.kaggle/kaggle.json` with 600 perms)
 - Missing columns: use `*_overrides` to set `text_column`/`label_column`, then re‑run `ingestor verify`
 - FastText NumPy compatibility: The project pins NumPy <2.0 for FastText compatibility. If you encounter NumPy 2.x issues, reinstall with `pip install -e .`
+
+> **🔄 State Management**: To start fresh or fix corrupted state, delete the `.state/` directory (`rm -rf .state/`). The ingestor will rebuild the state database on the next run. This is useful when:
+> - Changing dataset configurations (sources, overrides, quality thresholds)
+> - Troubleshooting duplicate detection issues
+> - Starting a completely new dataset collection
+> - Recovering from interrupted processing with state corruption
 
 Default logging shows a spinner per dataset with green approved/red rejected counts. HuggingFace dataset loading messages are suppressed for cleaner output. Add `--debug` for detailed logs including HuggingFace verbose messages.
 
