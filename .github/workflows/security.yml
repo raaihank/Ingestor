@@ -1,0 +1,131 @@
+name: CI - Security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: CodeQL Analyze (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: +security-extended
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze to SARIF directory (no upload)
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: ${{ github.workspace }}/codeql-results
+          upload: false   # <- prevents Code Scanning upload
+
+      - name: Upload CodeQL SARIF
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif
+          path: ${{ github.workspace }}/codeql-results/**/*.sarif
+          if-no-files-found: error
+          retention-days: 7
+
+  dependency-audit:
+    name: pip audit - Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pip-audit
+
+      - name: pip audit (ignore exit code)
+        run: pip-audit || true
+
+      - name: npm audit server (high+)
+        run: npm audit --audit-level=high || true
+
+      - name: npm audit dashboard (high+)
+        run: cd dashboard && npm audit --audit-level=high || true
+
+      - name: Save audit report
+        run: pip-audit -f json -o pip-audit-${{ matrix.python-version }}.json || true
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-${{ matrix.python-version }}
+          path: pip-audit-${{ matrix.python-version }}.json
+          retention-days: 7
+
+  secrets-scan:
+    name: Gitleaks scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Run in Docker; write SARIF into the checked-out repo dir
+      - name: Run Gitleaks (Docker) → SARIF
+        run: |
+          docker run --rm \
+            -v "$PWD":/repo \
+            -w /repo \
+            -e GITLEAKS_LICENSE="${{ secrets.GITLEAKS_LICENSE }}" \
+            zricethezav/gitleaks:latest \
+            detect \
+              --source . \
+              --report-format sarif \
+              --report-path /repo/gitleaks.sarif \
+              --no-banner
+        shell: bash
+        continue-on-error: true
+
+      - name: Upload Gitleaks SARIF
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: ${{ github.workspace }}/gitleaks.sarif
+          if-no-files-found: error
+          retention-days: 7

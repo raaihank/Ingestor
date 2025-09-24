@@ -1,0 +1,25 @@
+local:
+  - "test-data/*.jsonl"
+
+store_raw: false
+allowed_languages: [en]
+language_confidence: 0.7
+enforce_license: false
+
+global_label_map:
+  "1": malicious
+  "0": benign
+  malicious: malicious
+  benign: benign
+
+local_overrides:
+  "test-data/**":
+    text_column: text
+    label_column: label
+    category: prompt_injection_demo
+
+local_label_maps:
+  "test-data/**":
+    malicious: malicious
+    benign: benign
+

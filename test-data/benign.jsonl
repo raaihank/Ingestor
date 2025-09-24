@@ -1,0 +1,11 @@
+{"text":"What's the weather like in Paris this weekend?","label":"benign"}
+{"text":"Summarize the article about renewable energy trends.","label":"benign"}
+{"text":"Translate 'good morning' to Spanish.","label":"benign"}
+{"text":"Generate a shopping list for a pasta dinner.","label":"benign"}
+{"text":"Explain how photosynthesis works in simple terms.","label":"benign"}
+{"text":"Create a haiku about autumn leaves.","label":"benign"}
+{"text":"List three features of the Python language.","label":"benign"}
+{"text":"Calculate the area of a circle with radius 3.","label":"benign"}
+{"text":"Give me five synonyms for 'quickly'.","label":"benign"}
+{"text":"Draft an email to schedule a meeting next Tuesday.","label":"benign"}
+
