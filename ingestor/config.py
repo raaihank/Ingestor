@@ -43,6 +43,10 @@ class IngestConfig(BaseModel):
     min_length: int = Field(default=10)
     max_length: int = Field(default=10000)
     near_duplicate_threshold: float = Field(default=0.85)
+    # Parallelism (optional; may be auto-calculated at runtime)
+    io_workers: Optional[int] = Field(default=None)
+    cpu_workers: Optional[int] = Field(default=None)
+    batch_size: Optional[int] = Field(default=None)
     # Language detection model path
     fasttext_lid_path: Optional[str] = Field(default=None)
     # Verbosity level for logging (0,1,2)
@@ -106,6 +110,9 @@ class IngestConfig(BaseModel):
         hf_token: Optional[str] = None,
         kaggle_username: Optional[str] = None,
         kaggle_key: Optional[str] = None,
+        io_workers: Optional[int] = None,
+        cpu_workers: Optional[int] = None,
+        batch_size: Optional[int] = None,
     ) -> "IngestConfig":
         return cls(
             hf=hf,
@@ -125,6 +132,9 @@ class IngestConfig(BaseModel):
             hf_token=hf_token,
             kaggle_username=kaggle_username,
             kaggle_key=kaggle_key,
+            io_workers=io_workers,
+            cpu_workers=cpu_workers,
+            batch_size=batch_size,
         )
 
 

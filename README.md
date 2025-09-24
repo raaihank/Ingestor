@@ -23,9 +23,15 @@ pip install -e .[dev]
 ### Quick start (demo)
 
 ```bash
+# Run test dataset normalization using local files
 ingestor test
+
+# See the output
 cat test-data/unified.sample.jsonl | head -n 3
 ```
+
+Demo
+![!demo](./test-data/demo.png)
 
 ### Minimal YAML
 
@@ -81,6 +87,7 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
 - `ingestor verify` — dry‑run preview (flags: `--config`, `--per-dataset`, `--debug`)
 - `ingestor test` — demo on bundled `test-data/`
 - `ingestor version` — show version
+ - `ingestor tune` — suggest optimal `io-workers`, `cpu-workers`, and `batch-size` (flags: `--sample`, `--top-n`, `--target-batch-bytes`, `--json`)
 
 ### In‑depth configuration
 
@@ -111,6 +118,19 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
 - Default: one spinner line per active dataset, updated in place with green approved / red rejected counts
 - Non‑TTY/CI: plain final lines without spinner
 - `--debug`: structured debug logs to stderr as NDJSON, in addition to summaries
+
+### Performance tuning (parallel)
+
+- Two-stage concurrency:
+  - IO pool (threads): fetch/iterate sources in parallel (HF/Git/Kaggle/local)
+  - CPU pool (processes): normalize → quality → hash → dedupe in batches
+- Auto worker sizing:
+  - io-workers: min(32, 4×CPU cores)
+  - cpu-workers: max(1, CPU cores − 1)
+- Batch size: number of items processed together (reduces overhead, speeds SQLite and file writes)
+  - auto targets ~2MB per batch; adapts from a small sample
+  - manual override via `--batch-size N`
+- Use `ingestor tune` to see suggestions per machine; add `--sample data/unified.jsonl` for tighter batch estimates.
 
 ### Troubleshooting
 

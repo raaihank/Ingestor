@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Optional
+import platform
 
 import structlog
 import typer
@@ -75,6 +76,9 @@ def run(
     hf_token: Optional[str] = typer.Option(None, help="Hugging Face token (or set HF_TOKEN env)"),
     kaggle_username: Optional[str] = typer.Option(None, help="Kaggle username (or KAGGLE_USERNAME env)"),
     kaggle_key: Optional[str] = typer.Option(None, help="Kaggle key (or KAGGLE_KEY env)"),
+    io_workers: Optional[int] = typer.Option(None, help="Thread workers for IO stage (auto if omitted)"),
+    cpu_workers: Optional[int] = typer.Option(None, help="Process workers for CPU stage (auto if omitted)"),
+    batch_size: Optional[int] = typer.Option(None, help="Items per CPU batch (auto if omitted)"),
     debug: bool = typer.Option(False, "--debug", help="Enable detailed debug logs"),
 ):
     """Run ingestion from selected sources into a unified JSONL file."""
@@ -95,6 +99,9 @@ def run(
             hf_token=hf_token or os.getenv("HF_TOKEN"),
             kaggle_username=kaggle_username or os.getenv("KAGGLE_USERNAME"),
             kaggle_key=kaggle_key or os.getenv("KAGGLE_KEY"),
+            io_workers=io_workers,
+            cpu_workers=cpu_workers,
+            batch_size=batch_size,
         )
 
     # Apply HF token to environment for datasets/hf hub
@@ -137,7 +144,8 @@ def run(
         # Suppress dataset log lines during spinner rendering
         set_quiet(True)
         with Progress(
-            SpinnerColumn(spinner_name="line", style="grey50"),
+            SpinnerColumn(spinner_name="line", style="grey50", finished_text=""),
+            TextColumn("{task.fields[status]}", justify="right"),
             TextColumn("{task.description}"),
             TextColumn("[green]approved: {task.fields[approved]}[/green]  [red]rejected: {task.fields[rejected]}[/red]"),
             transient=True,
@@ -172,27 +180,31 @@ def run(
                     continue
                 last_update[ds] = now
                 if ds not in tasks:
-                    tasks[ds] = progress.add_task(ds, approved=0, rejected=0)
+                    tasks[ds] = progress.add_task(ds, approved=0, rejected=0, status="")
                 # Stop all other dataset tasks to avoid multiple spinning lines
                 for other_ds, tid in list(tasks.items()):
                     if other_ds != ds and not progress.tasks[tid].finished:
+                        # finalize other line with tick symbol now (no cross)
+                        sym = "[green]\u2713[/green]"
+                        progress.update(tid, status=sym)
                         progress.stop_task(tid)
                 progress.update(
                     tasks[ds],
                     description=ds,
                     approved=dataset_counts[ds]["approved"],
                     rejected=dataset_counts[ds]["rejected"],
+                    status="",
                 )
             for ds, tid in tasks.items():
-                symbol = "[green]\u2713[/green]" if dataset_counts.get(ds, {}).get("rejected", 0) == 0 else "[red]\u2717[/red]"
-                progress.update(tid, description=f"{ds} {symbol}", refresh=True)
+                symbol = "[green]\u2713[/green]"
+                progress.update(tid, status=symbol, refresh=True)
                 progress.stop_task(tid)
         # After progress ends (transient), print final per-dataset summary lines
         set_quiet(False)
         console = Console()
         for ds in dataset_order:
             counts = dataset_counts.get(ds, {"approved": 0, "rejected": 0})
-            symbol_plain = "\u2713" if counts.get("rejected", 0) == 0 else "\u2717"
+            symbol_plain = "\u2713"
             console.print("")
             console.print(f"{ds} {symbol_plain} approved: {counts['approved']} rejected: {counts['rejected']}")
     else:
@@ -320,6 +332,75 @@ def verify(
         for e in errors:
             console.print(e, style="red")
         raise typer.Exit(code=1)
+
+
+@app.command("tune")
+def tune(
+    sample: Optional[Path] = typer.Option(
+        None,
+        help="Optional JSONL file to sample for estimating average record size",
+    ),
+    top_n: int = typer.Option(200, help="Number of lines to sample from JSONL if provided"),
+    target_batch_bytes: int = typer.Option(
+        2 * 1024 * 1024, help="Target bytes per batch for throughput (default ~2MB)"
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON suggestions"),
+):
+    """Suggest optimal io-workers, cpu-workers, and batch size for this machine."""
+    cores = os.cpu_count() or 1
+    io_workers = min(32, max(4, cores * 4))
+    cpu_workers = max(1, cores - 1)
+
+    avg_bytes: Optional[float] = None
+    if sample and sample.exists():
+        try:
+            total = 0
+            lines = 0
+            with sample.open("r", encoding="utf-8", errors="ignore") as f:
+                for i, line in enumerate(f):
+                    if not line.strip():
+                        continue
+                    total += len(line)
+                    lines += 1
+                    if lines >= top_n:
+                        break
+            if lines > 0:
+                avg_bytes = total / lines
+        except Exception:
+            avg_bytes = None
+
+    def clamp(n: int, lo: int, hi: int) -> int:
+        return max(lo, min(hi, n))
+
+    if avg_bytes and avg_bytes > 0:
+        batch_size = int(target_batch_bytes / avg_bytes)
+    else:
+        batch_size = 256
+    batch_size = clamp(batch_size, 64, 1024)
+
+    suggestion = {
+        "os": platform.system().lower(),
+        "cpu_cores": cores,
+        "io_workers": io_workers,
+        "cpu_workers": cpu_workers,
+        "batch_size": batch_size,
+        "target_batch_bytes": target_batch_bytes,
+        "avg_record_bytes": (avg_bytes or None),
+    }
+
+    if json_out:
+        try:
+            import json as _json
+
+            typer.echo(_json.dumps(suggestion))
+            return
+        except Exception:
+            pass
+
+    typer.echo(
+        f"OS={suggestion['os']} cores={cores} \n"
+        f"io-workers={io_workers} cpu-workers={cpu_workers} batch-size={batch_size}"
+    )
 
 if __name__ == "__main__":
     app()
