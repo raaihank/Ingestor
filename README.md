@@ -38,16 +38,16 @@ Demo
 ```yaml
 # Auth
 hf_token: *******************
-# Models
+# Models (processes ALL splits by default)
 hf:
-  - deepset/prompt-injections
+  - deepset/prompt-injections  # Gets train + test + validation splits
 
 store_raw: false
-allowed_languages: [en]
+allowed_languages: [en]  # or ["*"] for all languages
 language_confidence: 0.7
 enforce_license: true
 
-# Normalize labels to malicious/benign
+# Normalize labels to malicious/benign (auto-formatted to lowercase_with_underscores)
 global_label_map:
   "1": malicious
   "0": benign
@@ -96,7 +96,7 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
 ### In‑depth configuration
 
 - Sources
-  - `hf`: list of HF datasets (all splits ingested by default)
+  - `hf`: list of HF datasets (**all splits** ingested by default: train, test, validation, etc.)
   - `kaggle`: list of Kaggle dataset refs
   - `git`: list of Git repo URLs (recurse and ingest data files)
   - `local`: list of filesystem globs (supports `**` recursion)
@@ -105,17 +105,20 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
   - `*_overrides.<id>.text_column` — pick text field when auto-detect is wrong
   - `*_overrides.<id>.label_column` — pick label field
   - `*_overrides.<id>.category` — annotate category into `meta.category`
+  - `*_overrides.<id>.split` — use specific split only (e.g., `"train"`, `"test"`)
   - `kaggle_overrides.<id>.include_globs` — restrict to data files
 
 - Label normalization
   - `global_label_map` maps raw → canonical (e.g., "1" → `malicious`)
   - `hf_label_maps` / `kaggle_label_maps` / `local_label_maps` override per dataset
+  - **Automatic formatting**: All labels converted to `lowercase_with_underscores` format
 
 - Quality thresholds
   - `min_entropy`, `min_length`, `max_length`, `near_duplicate_threshold`
 
 - Language detection
-  - `allowed_languages`, `language_confidence`, `fasttext_lid_path` (optional heavier model)
+  - `allowed_languages`: list of language codes (e.g., `[en, es, fr]`) or `["*"]` for all languages
+  - `language_confidence`, `fasttext_lid_path` (optional heavier model)
 
 ### Logging UX
 
@@ -159,6 +162,53 @@ The setup script:
 
 Without FastText, the system gracefully falls back to langdetect (slower but functional).
 
+### Dataset Split Handling
+
+**HuggingFace datasets now process ALL splits by default** (train, test, validation, etc.) instead of just the train split:
+
+```yaml
+hf:
+  - "deepset/prompt-injections"  # Gets both train (546) + test (116) = 662 records
+```
+
+**To use only specific splits:**
+
+```yaml
+hf_overrides:
+  "deepset/prompt-injections":
+    split: "train"  # Use only train split
+  "other/dataset":
+    split: "test"   # Use only test split
+```
+
+### Multilingual Support
+
+**Process datasets in any language** using the wildcard `"*"`:
+
+```yaml
+allowed_languages: ["*"]  # Accept all languages
+language_confidence: 0.3  # Lower threshold for multilingual content
+```
+
+**Or specify multiple languages:**
+
+```yaml
+allowed_languages: [en, es, fr, de, zh, ja]  # English, Spanish, French, German, Chinese, Japanese
+```
+
+### Label Normalization
+
+**All labels are automatically normalized** to a consistent format:
+
+| Input | Output |
+|-------|--------|
+| `"Prompt Injection"` | `"prompt_injection"` |
+| `"JAILBREAK"` | `"jailbreak"` |
+| `"Safe Content"` | `"safe_content"` |
+| `"benign-text"` | `"benign_text"` |
+
+This ensures consistent labeling across all datasets and sources.
+
 ### Troubleshooting
 
 - HF gated datasets: accept terms once in web UI, then set `HF_TOKEN`
@@ -184,6 +234,7 @@ hf_overrides:
     text_column: prompt
     label_column: label
     category: prompt_injection
+    split: "train"  # Optional: use only specific split
 kaggle_overrides:
   "owner/dataset":
     include_globs: ["**/*.jsonl","**/*.csv","**/*.tsv","**/*.parquet","**/*.arrow"]

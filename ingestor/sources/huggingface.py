@@ -87,23 +87,24 @@ def iter_huggingface(
         split_override = override.split
 
     license_id = None
-    # Try train split first; fallback to all splits
-    try:
-        split_to_use = split_override or "train"
-        ds = load_dataset(
-            path, name=name, split=split_to_use, token=token, revision=revision
-        )
-        info = getattr(ds, "info", None)
-        if info is not None:
-            lic = getattr(info, "license", None)
-            if lic is not None:
-                license_id = str(lic)
-        yield from _iter_rows(
-            ds, dataset_name, license_id, text_col, label_col
-        )
-        return
-    except Exception:
-        pass
+    # NEW BEHAVIOR: By default, use ALL splits unless explicitly specified
+    # If split is explicitly specified, use only that split
+    if split_override:
+        try:
+            ds = load_dataset(
+                path, name=name, split=split_override, token=token, revision=revision
+            )
+            info = getattr(ds, "info", None)
+            if info is not None:
+                lic = getattr(info, "license", None)
+                if lic is not None:
+                    license_id = str(lic)
+            yield from _iter_rows(
+                ds, dataset_name, license_id, text_col, label_col
+            )
+            return
+        except Exception:
+            pass  # Fall through to all splits if specified split fails
 
     try:
         ds_dict = load_dataset(path, name=name, token=token, revision=revision)

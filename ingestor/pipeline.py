@@ -10,7 +10,7 @@ from typing import Dict, Generator, Iterable, Optional
 
 from .config import IngestConfig
 from .logging_utils import log_dataset, log_debug, log_success
-from .normalization import normalize_text
+from .normalization import normalize_text, normalize_label
 from .quality import (
     LanguageFilter,
     LicenseValidator,
@@ -69,6 +69,9 @@ class IngestPipeline:
                     mapped = self.config.global_label_map.get(label_str, None)
                 if mapped is not None:
                     label = mapped
+                
+                # Apply final label normalization (lowercase, underscores)
+                label = normalize_label(str(label))
             except Exception:
                 pass
 

@@ -98,7 +98,11 @@ class LanguageFilter:
         confidence: float = 0.7,
         model_path: Optional[Path] = None,
     ) -> None:
-        self.allowed = set(allowed_languages or ["en"])
+        # Support "*" as special marker for all languages
+        if allowed_languages and "*" in allowed_languages:
+            self.allowed = set(["*"])  # Special marker for all languages
+        else:
+            self.allowed = set(allowed_languages or ["en"])
         self.confidence = confidence
         self.model = None
         self.last_lang: Optional[str] = None
@@ -128,6 +132,9 @@ class LanguageFilter:
                 primary_lang = labels[0].replace("__label__", "")
                 primary_conf = float(probs[0])
                 self.last_lang, self.last_conf = primary_lang, primary_conf
+                # If "*" is in allowed, accept any language above confidence threshold
+                if "*" in self.allowed:
+                    return primary_conf >= self.confidence
                 return primary_lang in self.allowed and primary_conf >= self.confidence
             except Exception as e:
                 # Handle NumPy compatibility issues or other FastText errors
@@ -147,6 +154,9 @@ class LanguageFilter:
                     return False
                 primary = detections[0]
                 self.last_lang, self.last_conf = primary.lang, float(primary.prob)
+                # If "*" is in allowed, accept any language above confidence threshold
+                if "*" in self.allowed:
+                    return float(primary.prob) >= self.confidence
                 return primary.lang in self.allowed and float(primary.prob) >= self.confidence
             except Exception:
                 self.last_lang, self.last_conf = None, None
