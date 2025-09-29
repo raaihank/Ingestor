@@ -7,12 +7,19 @@ import os
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterator, Optional
 
 try:
     import orjson  # type: ignore
 except Exception:  # pragma: no cover
     orjson = None  # type: ignore
+
+try:
+    import pandas as pd  # type: ignore
+    PANDAS_AVAILABLE = True
+except Exception:  # pragma: no cover
+    PANDAS_AVAILABLE = False
 
 
 @dataclass
@@ -54,19 +61,91 @@ def extract_text(obj: Dict[str, Any], override_field: Optional[str]) -> str:
     )
 
 
+def detect_file_format(file_path: str) -> str:
+    """Detect file format based on extension."""
+    ext = Path(file_path).suffix.lower()
+    if ext == ".csv":
+        return "csv"
+    elif ext in [".jsonl", ".json"]:
+        return "jsonl"
+    else:
+        # Default to JSONL for unknown extensions
+        return "jsonl"
+
+
+def read_csv_records(file_path: str, chunk_size: int = 10000) -> Iterator[Dict[str, Any]]:
+    """Read CSV file in chunks and yield records as dictionaries."""
+    if not PANDAS_AVAILABLE:
+        raise ImportError(
+            "pandas is required to read CSV files. Install with: pip install pandas"
+        )
+    
+    try:
+        # Read CSV in chunks to handle large files
+        for chunk in pd.read_csv(file_path, chunksize=chunk_size):
+            for _, row in chunk.iterrows():
+                # Convert pandas Series to dictionary, handling NaN values
+                record = {}
+                for col, val in row.items():
+                    if pd.isna(val):
+                        record[col] = None
+                    else:
+                        record[col] = val
+                yield record
+    except Exception as e:
+        print(f"Error reading CSV file: {e}")
+        sys.exit(1)
+
+
+def read_jsonl_records(file_path: str) -> Iterator[Dict[str, Any]]:
+    """Read JSONL file and yield records as dictionaries."""
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = load_line(line)
+                yield obj
+            except Exception:
+                continue
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compute quick insights for a JSONL dataset")
-    parser.add_argument("--input", required=True, help="Path to input JSONL file")
-    parser.add_argument("--top", type=int, default=10, help="Top-N items to display per category")
-    parser.add_argument("--text-field", default=None, help="Override text field (default: auto)")
-    parser.add_argument("--json", dest="as_json", action="store_true", help="Emit JSON instead of text")
-    parser.add_argument("--hash-stats", action="store_true", help="Compute prompt_hash duplicate stats")
-    parser.add_argument("--max-hashes", type=int, default=500000, help="Max hashes to track (memory bound)")
+    parser = argparse.ArgumentParser(
+        description="Compute quick insights for a JSONL or CSV dataset"
+    )
+    parser.add_argument(
+        "--input", required=True, help="Path to input JSONL or CSV file"
+    )
+    parser.add_argument(
+        "--top", type=int, default=10, help="Top-N items to display per category"
+    )
+    parser.add_argument(
+        "--text-field", default=None, help="Override text field (default: auto)"
+    )
+    parser.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emit JSON instead of text"
+    )
+    parser.add_argument(
+        "--hash-stats", action="store_true", help="Compute prompt_hash duplicate stats"
+    )
+    parser.add_argument(
+        "--max-hashes", type=int, default=500000, help="Max hashes to track (memory bound)"
+    )
     args = parser.parse_args()
 
     path = args.input
     if not os.path.isfile(path):
         print(f"Input file does not exist: {path}")
+        sys.exit(1)
+
+    # Detect file format
+    file_format = detect_file_format(path)
+    if file_format == "csv" and not PANDAS_AVAILABLE:
+        print(
+            "Error: pandas is required to read CSV files. Install with: pip install pandas"
+        )
         sys.exit(1)
 
     total = 0
@@ -85,76 +164,75 @@ def main() -> None:
     unique_hashes: Optional[set[str]] = set() if args.hash_stats else None
     dup_count = 0
 
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = load_line(line)
-            except Exception:
-                continue
-            total += 1
+    # Choose appropriate reader based on file format
+    if file_format == "csv":
+        record_iterator = read_csv_records(path)
+    else:
+        record_iterator = read_jsonl_records(path)
 
-            # text field
-            text = extract_text(obj, args.text_field)
-            if args.text_field and text_field_used == "auto":
-                text_field_used = args.text_field
-            length_stats.add(len(text))
+    for obj in record_iterator:
+        total += 1
 
-            # label detection (single field heuristic)
-            label_value: Optional[Any] = None
-            candidates = (
-                ["label", "labels", "target", "class", "category", "is_malicious", "malicious", "y"]
-            )
-            if "label" in obj and obj["label"] is not None:
-                label_value = obj["label"]
-                label_fields_seen.add("label")
-                if label_field_used is None:
-                    label_field_used = "label"
-            else:
-                for k in candidates:
-                    if k in obj and obj[k] is not None:
-                        label_value = obj[k]
-                        label_fields_seen.add(k)
-                        if label_field_used is None:
-                            label_field_used = k
-                        break
-            if label_value is not None:
-                labeled_count += 1
-                label_counts[str(label_value)] += 1
-            else:
-                unlabeled_count += 1
+        # text field
+        text = extract_text(obj, args.text_field)
+        if args.text_field and text_field_used == "auto":
+            text_field_used = args.text_field
+        length_stats.add(len(text))
 
-            # source
-            if "source" in obj and obj["source"]:
-                source_counts[str(obj["source"]) ] += 1
+        # label detection (single field heuristic)
+        label_value: Optional[Any] = None
+        candidates = [
+            "label", "labels", "target", "class", "category", 
+            "is_malicious", "malicious", "y"
+        ]
+        if "label" in obj and obj["label"] is not None:
+            label_value = obj["label"]
+            label_fields_seen.add("label")
+            if label_field_used is None:
+                label_field_used = "label"
+        else:
+            for k in candidates:
+                if k in obj and obj[k] is not None:
+                    label_value = obj[k]
+                    label_fields_seen.add(k)
+                    if label_field_used is None:
+                        label_field_used = k
+                    break
+        if label_value is not None:
+            labeled_count += 1
+            label_counts[str(label_value)] += 1
+        else:
+            unlabeled_count += 1
 
-            # meta
-            meta = obj.get("meta") or {}
-            if isinstance(meta, dict):
-                ds = meta.get("dataset")
-                if ds:
-                    dataset_counts[str(ds)] += 1
-                cat = meta.get("category")
-                if cat:
-                    category_counts[str(cat)] += 1
-                lic = meta.get("license")
-                if lic:
-                    license_counts[str(lic)] += 1
+        # source
+        if "source" in obj and obj["source"]:
+            source_counts[str(obj["source"])] += 1
 
-            # prompt_hash duplicate tracking (optional)
-            if unique_hashes is not None:
-                h = obj.get("prompt_hash")
-                if isinstance(h, str):
-                    if len(unique_hashes) < args.max_hashes:
-                        if h in unique_hashes:
-                            dup_count += 1
-                        else:
-                            unique_hashes.add(h)
+        # meta
+        meta = obj.get("meta") or {}
+        if isinstance(meta, dict):
+            ds = meta.get("dataset")
+            if ds:
+                dataset_counts[str(ds)] += 1
+            cat = meta.get("category")
+            if cat:
+                category_counts[str(cat)] += 1
+            lic = meta.get("license")
+            if lic:
+                license_counts[str(lic)] += 1
+
+        # prompt_hash duplicate tracking (optional)
+        if unique_hashes is not None:
+            h = obj.get("prompt_hash")
+            if isinstance(h, str):
+                if len(unique_hashes) < args.max_hashes:
+                    if h in unique_hashes:
+                        dup_count += 1
                     else:
-                        # capacity reached; skip further tracking
-                        unique_hashes = None
+                        unique_hashes.add(h)
+                else:
+                    # capacity reached; skip further tracking
+                    unique_hashes = None
 
     def top_n(counter: Counter[str]) -> list[tuple[str, int]]:
         return counter.most_common(args.top)
@@ -212,10 +290,12 @@ def main() -> None:
     print(f"Label field used: {report['label_field_used']}")
     # Full label breakdown
     labels_info = report["labels"]
+    labeled_pct = (
+        round((labels_info['total_labeled']/total)*100.0, 2) if total else 0.0
+    )
     print(
         f"Labels: total_labeled={labels_info['total_labeled']} "
-        f"({round((labels_info['total_labeled']/total)*100.0,2) if total else 0.0}%)  "
-        f"total_unlabeled={labels_info['total_unlabeled']}"
+        f"({labeled_pct}%)  total_unlabeled={labels_info['total_unlabeled']}"
     )
     if report["labels_top"]:
         print("\nTop labels:")
@@ -242,12 +322,15 @@ def main() -> None:
     if ph:
         print("\nPrompt hash:")
         if ph.get("tracking_capped"):
-            print("  tracking_capped: true (set --hash-stats to compute, may use memory)")
+            print(
+                "  tracking_capped: true (set --hash-stats to compute, may use memory)"
+            )
         else:
-            print(f"  unique: {ph.get('unique')} duplicates: {ph.get('duplicates')} dup_ratio: {ph.get('dup_ratio')}")
+            unique = ph.get('unique')
+            dups = ph.get('duplicates')
+            ratio = ph.get('dup_ratio')
+            print(f"  unique: {unique} duplicates: {dups} dup_ratio: {ratio}")
 
 
 if __name__ == "__main__":
     main()
-
-

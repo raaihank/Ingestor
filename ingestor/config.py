@@ -43,6 +43,11 @@ class IngestConfig(BaseModel):
     min_length: int = Field(default=10)
     max_length: int = Field(default=10000)
     near_duplicate_threshold: float = Field(default=0.85)
+    # Enhanced deduplication settings
+    near_dup_num_perm: int = Field(default=256)  # MinHash permutations
+    near_dup_memory_limit: int = Field(default=1_000_000)  # Max signatures
+    preserve_evasion_variants: bool = Field(default=True)  # Preserve evasion
+    enable_duplicate_logging: bool = Field(default=True)  # Log decisions
     # Parallelism (optional; may be auto-calculated at runtime)
     io_workers: Optional[int] = Field(default=None)
     cpu_workers: Optional[int] = Field(default=None)

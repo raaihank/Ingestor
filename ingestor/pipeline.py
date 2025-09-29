@@ -10,7 +10,11 @@ from typing import Dict, Generator, Iterable, Optional
 
 from .config import IngestConfig
 from .logging_utils import log_dataset, log_debug, log_success
-from .normalization import normalize_text, normalize_label
+from .normalization import (
+    normalize_text_heavy,
+    normalize_text_light,
+    normalize_label,
+)
 from .quality import (
     LanguageFilter,
     LicenseValidator,
@@ -43,7 +47,14 @@ class IngestPipeline:
 
     def __post_init__(self) -> None:
         self.state = StateStore(db_path=Path(".state/ingest.sqlite"))
-        self.dup_detector = NearDuplicateDetector(threshold=self.config.near_duplicate_threshold)
+        
+        # Enhanced near-duplicate detector with configuration
+        self.dup_detector = NearDuplicateDetector(
+            num_perm=self.config.near_dup_num_perm,
+            state_db_path=Path(".state/near_dup_sigs.sqlite"),
+            memory_limit=self.config.near_dup_memory_limit
+        )
+        
         self.license_validator = LicenseValidator()
         self.language_filter = LanguageFilter(
             allowed_languages=self.config.allowed_languages,
@@ -61,10 +72,26 @@ class IngestPipeline:
             try:
                 label_str = str(label)
                 mapped = None
+                
+                # Try exact dataset_id match first (e.g., "dataset:split")
                 if dataset_id and dataset_id in self.config.hf_label_maps:
                     mapped = self.config.hf_label_maps[dataset_id].get(label_str, None)
+                
+                # If no match and dataset_id has a split (contains ":"), try base name
+                if mapped is None and dataset_id and ":" in dataset_id:
+                    base_dataset_id = dataset_id.split(":")[0]
+                    if base_dataset_id in self.config.hf_label_maps:
+                        mapped = self.config.hf_label_maps[base_dataset_id].get(label_str, None)
+                
+                # Try kaggle label maps (with same fallback logic)
                 if mapped is None and dataset_id and dataset_id in self.config.kaggle_label_maps:
                     mapped = self.config.kaggle_label_maps[dataset_id].get(label_str, None)
+                if mapped is None and dataset_id and ":" in dataset_id:
+                    base_dataset_id = dataset_id.split(":")[0] 
+                    if base_dataset_id in self.config.kaggle_label_maps:
+                        mapped = self.config.kaggle_label_maps[base_dataset_id].get(label_str, None)
+                
+                # Finally try global map
                 if mapped is None:
                     mapped = self.config.global_label_map.get(label_str, None)
                 if mapped is not None:
@@ -152,9 +179,9 @@ class IngestPipeline:
                 f"[quality] rejected: language lang={self.language_filter.last_lang} conf={self.language_filter.last_conf}"
             )
             return False
-        if self.dup_detector.is_duplicate(text)[0]:
-            log_debug("[quality] rejected: near-duplicate")
-            return False
+        # Enhanced duplicate detection is now handled in _build_record 
+        # to access doc_id, source, and label info
+        pass
         if self.config.enforce_license and not self.license_validator.validate_source_license(meta):
             log_debug(f"[quality] rejected: license {meta.get('license')}")
             return False
@@ -162,8 +189,12 @@ class IngestPipeline:
 
     def _build_record(self, item: Dict) -> Optional[Dict]:
         raw: str = str(item.get("raw", ""))
-        normalized = normalize_text(raw)
-        prompt_hash = sha256_hex(normalized)
+        
+        # Two-view normalization approach
+        text_light = normalize_text_light(raw)  # For near-duplicate detection  
+        text_heavy = normalize_text_heavy(raw)  # For exact duplicate detection
+        prompt_hash = sha256_hex(text_heavy)    # Hash heavy version for exact dedup
+        
         source = str(item.get("source", "unknown"))
         source_id = str(item.get("source_id", ""))
         label = item.get("label")
@@ -172,19 +203,38 @@ class IngestPipeline:
 
         label, meta = self._normalize_label_and_inject_category(label, meta, dataset_id)
 
-        if not self._passes_quality(normalized, meta):
+        # Quality checks use light version to preserve evasion variants
+        if not self._passes_quality(text_light, meta):
             return None
 
+        # Exact duplicate check using heavy normalization
         if self.state.has_seen(source, source_id, prompt_hash):
             log_debug("[quality] rejected: duplicate (exact)")
             return None
+
+        # Enhanced near-duplicate detection
+        doc_id = f"{source}:{source_id}"
+        dup_result = self.dup_detector.is_duplicate(raw, doc_id, source, label or "unknown")
+        
+        if dup_result.is_duplicate:
+            log_debug(f"[quality] rejected: {dup_result.reason} (similarity={dup_result.similarity:.3f})")
+            return None
+        
+        # Log special cases for monitoring
+        if dup_result.reason == "evasion_variant":
+            log_debug(f"[quality] kept evasion variant: {dup_result.evasion_type} (similarity={dup_result.similarity:.3f})")
+            if "evasion_variant_of" not in meta:
+                meta["evasion_variant_of"] = dup_result.duplicate_of
+                meta["evasion_type"] = dup_result.evasion_type
+        
+        # Mark as seen for exact duplicate tracking
         self.state.mark_seen(source, source_id, prompt_hash)
 
         rec = {
-            "id": f"{source}:{source_id}",
+            "id": doc_id,
             "source": source,
             "source_id": source_id,
-            "normalized_text": normalized,
+            "normalized_text": text_light,  # Use light normalization in output
             "prompt_hash": prompt_hash,
             "label": label,
             "meta": meta,
