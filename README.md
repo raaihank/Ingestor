@@ -30,7 +30,6 @@ ingestor test
 cat test-data/unified.sample.jsonl | head -n 3
 ```
 
-Demo
 ![!demo](./test-data/demo.png)
 
 ### Minimal YAML
