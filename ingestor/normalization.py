@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Dict, Set, Tuple
+from typing import Any, Dict, Set, Tuple
 
 from unidecode import unidecode
 
@@ -89,6 +89,15 @@ def normalize_text_heavy(text: str) -> str:
 
 # Alias for backward compatibility
 normalize_text = normalize_text_heavy
+
+
+def label_key(value: Any) -> str:
+    """Text form of a label value: True -> "true", 1.0 -> "1", "x" -> "x"."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def normalize_label(label: str) -> str:

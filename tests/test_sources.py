@@ -281,3 +281,22 @@ def test_kaggle_override_reaches_source(tmp_path, make_config, ingest, monkeypat
     ingest(make_config(kaggle=["o/d"], kaggle_overrides={"o/d": {"text_column": "prompt"}}), tmp_path / "out.jsonl")
     assert seen["o/d"].text_column == "prompt"
 
+
+def test_unquoted_label_map_keys_end_to_end(tmp_path, ingest):
+    write_jsonl(tmp_path / "a.jsonl", [
+        {"text": "first sample text", "label": 1},
+        {"text": "second sample text", "label": True},
+        {"text": "third sample text", "label": "yes"},
+        {"text": "fourth sample text", "label": 0},
+    ])
+    cfg_path = tmp_path / "c.yaml"
+    cfg_path.write_text(
+        f"local: ['{tmp_path / 'a.jsonl'}']\n"
+        "allowed_languages: ['*']\nlanguage_confidence: 0.0\nmin_entropy: 0.0\nmin_length: 0\ncpu_workers: 1\n"
+        f"state_dir: '{tmp_path / '.state'}'\n"
+        "global_label_map:\n  1: malicious\n  true: malicious\n  yes: malicious\n  0: benign\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.jsonl"
+    ingest(load_config(cfg_path), out)
+    assert [r["label"] for r in read_jsonl(out)] == ["malicious", "malicious", "malicious", "benign"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, TypeVar, Union
 from typing import Dict as TypingDict
@@ -9,7 +10,43 @@ from typing import Dict as TypingDict
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .normalization import label_key
+
 T = TypeVar("T")
+
+
+class _ConfigLoader(yaml.SafeLoader):
+    """SafeLoader for config files.
+
+    Mapping keys are always text, so `1:`, `true:` and `yes:` are label names rather than
+    numbers or booleans (which would also collide: True == 1). Only true/false are booleans;
+    yes/no/on/off stay words (`no` is the code for Norwegian).
+    """
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> Any:
+        if isinstance(node, yaml.MappingNode):
+            self.flatten_mapping(node)  # resolve `<<` merge keys before retagging
+            for key_node, _ in node.value:
+                if isinstance(key_node, yaml.ScalarNode):
+                    key_node.tag = "tag:yaml.org,2002:str"
+        return super().construct_mapping(node, deep=deep)
+
+
+_ConfigLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_ConfigLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
+
+def _label_map_text(mapping: Dict[Any, Any]) -> Dict[Any, Any]:
+    """Label map with number/boolean keys and values in their label text form."""
+    def text(value: Any) -> Any:
+        return label_key(value) if isinstance(value, (bool, int, float)) else value
+
+    return {text(k): text(v) for k, v in mapping.items()}
 
 
 def glob_match(path: str, pattern: str) -> bool:
@@ -135,6 +172,15 @@ class IngestConfig(BaseModel):
                 data[key] = {}
             elif isinstance(v, dict) and key != "global_label_map":
                 data[key] = {k: ({} if val is None else val) for k, val in v.items()}
+        # Label maps built in Python may use 1 / True as keys or values
+        if isinstance(data.get("global_label_map"), dict):
+            data["global_label_map"] = _label_map_text(data["global_label_map"])
+        for key in ("hf_label_maps", "kaggle_label_maps", "local_label_maps"):
+            maps = data.get(key)
+            if isinstance(maps, dict):
+                data[key] = {
+                    name: _label_map_text(m) if isinstance(m, dict) else m for name, m in maps.items()
+                }
         return data
 
     def override_for(
@@ -166,5 +212,5 @@ class IngestConfig(BaseModel):
 
 def load_config(path: Path) -> IngestConfig:
     with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yaml.load(f, Loader=_ConfigLoader)  # _ConfigLoader is a SafeLoader subclass
     return IngestConfig.model_validate(data or {})

@@ -145,7 +145,7 @@ Copy one into a file (e.g. `my.config.yaml`), check it with `ingestor verify --c
 - [Tuning deduplication](#tuning-deduplication)
 - [Tuning speed](#tuning-speed)
 
-> **Quote label-map keys** such as `"1"`, `"0"`, `"true"` and `"false"`. Unquoted, YAML reads them as numbers or booleans and the config is rejected.
+> Label-map keys work with or without quotes (`1:`, `"1":`, `true:`): config keys are always read as text. Only `true`/`false` are booleans, so `yes`, `no`, `on` and `off` stay plain words (e.g. `no` for Norwegian in `allowed_languages`).
 
 #### Local files with your own columns
 
@@ -167,10 +167,10 @@ local_overrides:
     category: support_tickets
 
 global_label_map:
-  "true": malicious
-  "false": benign
-  "1": malicious
-  "0": benign
+  true: malicious
+  false: benign
+  1: malicious
+  0: benign
 ```
 
 #### Prompt-injection corpus from Hugging Face
@@ -203,16 +203,16 @@ hf_overrides:
     label_column: is_dangerous   # this dataset has no "label" column
 
 global_label_map:
-  "1": malicious
-  "0": benign
+  1: malicious
+  0: benign
   jailbreak: malicious
   benign: benign
 
 hf_label_maps:
   hackaprompt/hackaprompt-dataset:
     # Every row is an injection attempt; "correct" only says whether it succeeded
-    "true": malicious
-    "false": malicious
+    true: malicious
+    false: malicious
 ```
 
 #### Mixing Hugging Face, Kaggle, Git and local sources
@@ -243,8 +243,8 @@ kaggle_overrides:
     category: prompt_injection
 
 global_label_map:
-  "1": malicious
-  "0": benign
+  1: malicious
+  0: benign
 ```
 
 #### License-clean corpus

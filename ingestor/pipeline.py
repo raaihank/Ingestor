@@ -13,7 +13,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, Iterator, List, NamedTu
 
 from .config import IngestConfig, Override
 from .logging_utils import log_dataset, log_debug, log_error, log_success
-from .normalization import classify_evasion, fold_typography, normalize_label
+from .normalization import classify_evasion, fold_typography, label_key, normalize_label
 from .prepare import Prepared, PrepareParams, init_pool_worker, init_worker, prepare_batch
 from .quality import LicenseValidator, NearDuplicateDetector
 from .sources.git import iter_git_repo
@@ -41,14 +41,6 @@ def dataset_label(item: Dict) -> str:
     """Per-dataset key used for progress and summaries."""
     meta = item.get("meta") or {}
     return str(meta.get("dataset") or item.get("source") or "unknown")
-
-
-def _label_key(label: Any) -> str:
-    if isinstance(label, bool):
-        return "true" if label else "false"
-    if isinstance(label, float) and label.is_integer():
-        return str(int(label))
-    return str(label)
 
 
 def _map_label(mapping: Dict[str, str], key: str) -> Optional[str]:
@@ -119,7 +111,7 @@ class IngestPipeline:
         label = item.get("label")
         if label is None:
             return None
-        key = _label_key(label)
+        key = label_key(label)
         kind, keys, path = self._lookup_keys(item)
         for mapping in (self.config.label_map_for(kind, keys, path), self.config.global_label_map):
             mapped = _map_label(mapping, key)

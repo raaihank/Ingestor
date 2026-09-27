@@ -120,3 +120,40 @@ def test_same_encoded_payload_with_punctuation_change_is_not_evasion():
     payload = "sssboyxzligjlzw4gufdor=="
     assert classify_evasion(f"decode {payload} now", f"decode {payload}: now") == ""
 
+
+def test_config_yaml_keys_are_text_and_only_true_false_are_booleans(tmp_path):
+    from ingestor.config import load_config
+
+    path = tmp_path / "c.yaml"
+    path.write_text(
+        "allowed_languages: [en, no]\n"
+        "store_raw: yes\n"
+        "enforce_license: off\n"
+        "global_label_map:\n"
+        "  1: malicious\n"
+        "  0: benign\n"
+        "  true: malicious\n"
+        "  false: benign\n"
+        "  yes: malicious\n"
+        "hf_label_maps:\n"
+        "  owner/ds:\n"
+        "    2: jailbreak\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.allowed_languages == ["en", "no"]  # "no" is Norwegian, not False
+    assert cfg.store_raw is True and cfg.enforce_license is False
+    assert cfg.global_label_map == {
+        "1": "malicious", "0": "benign", "true": "malicious", "false": "benign", "yes": "malicious",
+    }
+    assert cfg.hf_label_maps == {"owner/ds": {"2": "jailbreak"}}
+
+
+def test_config_label_maps_from_python_accept_numbers_and_booleans():
+    from ingestor.config import IngestConfig
+
+    cfg = IngestConfig.model_validate(
+        {"global_label_map": {1: "malicious", 0: "benign"}, "hf_label_maps": {"a/b": {False: 0}}}
+    )
+    assert cfg.global_label_map == {"1": "malicious", "0": "benign"}
+    assert cfg.hf_label_maps == {"a/b": {"false": "0"}}
