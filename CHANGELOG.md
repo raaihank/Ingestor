@@ -6,6 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor release can include
 breaking changes; they are listed under **Changed (breaking)**.
 
+## [0.4.0] - 2026-09-27
+
+### Changed (breaking)
+
+- Every setting is checked when the config loads. Out-of-range values are errors, for example
+  `language_confidence: 7`, a `min_length` above `max_length`, `batch_size: 0` or a
+  `near_dup_num_perm` below 16. An invalid config file or command-line option makes the command
+  exit with code 2 and a message naming the setting, instead of a traceback or a silently ignored
+  value.
+- `fasttext_lid_path` must point to an existing file, and `allowed_languages` must list at least one
+  language.
+- With a `split:` override, record ids now keep the split name (`hf:owner/ds:train:0`), as they
+  already did without one.
+
+### Added
+
+- `hf_overrides` and `hf_label_maps` entries keyed `name:split` refine the `name` entry for that
+  split.
+- A warning when a local glob matches no files, and when `near_dup_num_perm` is changed for an
+  output that already has saved signatures.
+- Tests for every config setting, and a check that the README's YAML examples stay valid.
+
+### Fixed
+
+- `allowed_languages` codes match regardless of case and region: `zh` accepts Chinese (reported as
+  `zh-cn`) and `EN` accepts English. Before, both rejected every row.
+- `hf_token`, `kaggle_username` and `kaggle_key` set in the config are used by every command and by
+  the Python API; before, only `ingestor run` and `ingestor verify` applied them.
+- A `name:split` override applied its category but not its text or label column.
+- The README said a row's own `category` column always takes precedence; that is true only for
+  Hugging Face rows.
+
 ## [0.3.0] - 2026-09-27
 
 ### Changed (breaking)
@@ -113,6 +145,7 @@ This release makes resuming, de-duplication and the configuration work as docume
 - Parallel loading and processing, and atomic JSONL output.
 - CI workflows for build, tests and security scans.
 
+[0.4.0]: https://github.com/raaihank/Ingestor/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/raaihank/Ingestor/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/raaihank/Ingestor/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/raaihank/Ingestor/compare/v0.1.0...v0.2.0
