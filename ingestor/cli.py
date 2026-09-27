@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 import typer
+import yaml
+from pydantic import ValidationError
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -19,6 +21,23 @@ from .sources.huggingface import _parse_hf_spec
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 log = structlog.get_logger()
+
+
+def _describe(error: Exception) -> str:
+    """One line per problem, naming the config key."""
+    if isinstance(error, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or 'config'}: {err['msg']}" for err in error.errors()
+        )
+    return str(error)
+
+
+def _load_config_or_exit(path: Path) -> IngestConfig:
+    try:
+        return load_config(path)
+    except (ValidationError, yaml.YAMLError, OSError) as e:
+        log_error(f"Invalid config {path}: {_describe(e)}")
+        raise typer.Exit(code=2) from None
 
 
 def _apply_credentials(cfg: IngestConfig) -> None:
@@ -82,7 +101,8 @@ def test(
 ):
     """Run a demo ingest using bundled test data to showcase the pipeline."""
     structlog.configure(processors=[structlog.processors.JSONRenderer()])
-    cfg: IngestConfig = load_config(config)
+    cfg: IngestConfig = _load_config_or_exit(config)
+    _apply_credentials(cfg)
 
     pipeline = IngestPipeline(config=cfg)
     set_verbosity(2 if debug else cfg.verbose)
@@ -128,7 +148,7 @@ def run(
     """Run ingestion from selected sources into a unified JSONL file."""
     structlog.configure(processors=[structlog.processors.JSONRenderer()])
 
-    cfg = load_config(config) if config else IngestConfig()
+    cfg = _load_config_or_exit(config) if config else IngestConfig()
     # Flags given on the command line override the config file
     updates: Dict[str, Any] = {}
     for key, extra in (("hf", hf), ("git", git), ("kaggle", kaggle), ("local", local)):
@@ -150,7 +170,12 @@ def run(
     }
     updates.update({k: v for k, v in flag_values.items() if v is not None})
     if updates:
-        cfg = cfg.model_copy(update=updates)
+        try:
+            # Re-validate so flag values get the same checks as the config file
+            cfg = IngestConfig.model_validate({**cfg.model_dump(), **updates})
+        except ValidationError as e:
+            log_error(f"Invalid option: {_describe(e)}")
+            raise typer.Exit(code=2) from None
     if not (cfg.hf or cfg.git or cfg.kaggle or cfg.local):
         log_error("No sources configured: pass --config or --hf/--git/--kaggle/--local")
         raise typer.Exit(code=2)
@@ -238,7 +263,7 @@ def verify(
 ):
     """Dry-run: preview columns/category, sample texts, and label distribution. Fails if columns missing (HF)."""
     structlog.configure(processors=[structlog.processors.JSONRenderer()])
-    cfg: IngestConfig = load_config(config)
+    cfg: IngestConfig = _load_config_or_exit(config)
     set_verbosity(2 if debug else cfg.verbose)
     _apply_credentials(cfg)
 

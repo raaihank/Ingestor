@@ -10,7 +10,7 @@ from ..logging_utils import log_debug, log_warning
 from .hf_repo import iter_hf_repo
 
 if TYPE_CHECKING:
-    from ..config import IngestConfig
+    from ..config import HfOverride, IngestConfig
 
 
 def _parse_hf_spec(spec: str) -> tuple[str, str | None, str | None]:
@@ -95,25 +95,34 @@ def _iter_rows(
 def iter_huggingface(
     dataset_name: str, config: "IngestConfig | None" = None
 ) -> Generator[Dict, None, None]:
-    # datasets respects HF_TOKEN/HUGGINGFACEHUB_API_TOKEN env vars
-    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    # The config's hf_token wins over the HF_TOKEN/HUGGINGFACEHUB_API_TOKEN env vars
+    token = (
+        (config.hf_token if config else None)
+        or os.getenv("HF_TOKEN")
+        or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    )
 
     path, name, revision = _parse_hf_spec(dataset_name)
 
-    # Get overrides for this dataset
-    text_col = None
-    label_col = None
-    split_override = None
-    license_override: Optional[str] = None
+    def override(split: Optional[str] = None) -> Optional[HfOverride]:
+        # `name:split` entries refine the `name` entry
+        return config.hf_override(dataset_name, split) if config else None
 
-    if config and dataset_name in config.hf_overrides:
-        override = config.hf_overrides[dataset_name]
-        text_col = override.text_column
-        label_col = override.label_column
-        split_override = override.split
-        license_override = override.license
+    base = override()
+    split_override = base.split if base else None
+    card_license = (base.license if base else None) or _card_license(path, token, revision)
 
-    card_license = license_override or _card_license(path, token, revision)
+    def rows(ds: Any, split: str) -> Generator[Dict, None, None]:
+        ov = override(split)
+        license_id = (ov.license if ov else None) or card_license or _info_license(ds)
+        yield from _iter_rows(
+            ds,
+            f"{dataset_name}:{split}",
+            license_id,
+            ov.text_column if ov else None,
+            ov.label_column if ov else None,
+            dataset_name,
+        )
 
     # By default use ALL splits; an explicit split uses only that split
     if split_override:
@@ -123,9 +132,7 @@ def iter_huggingface(
             )
         except Exception as e:
             raise RuntimeError(f"could not load split {split_override!r} of {dataset_name}: {e}") from e
-        yield from _iter_rows(
-            ds, dataset_name, card_license or _info_license(ds), text_col, label_col, dataset_name
-        )
+        yield from rows(ds, split_override)
         return
 
     try:
@@ -136,20 +143,12 @@ def iter_huggingface(
             path,
             spec=dataset_name,
             license_id=card_license,
-            text_column=text_col,
-            label_column=label_col,
+            text_column=base.text_column if base else None,
+            label_column=base.label_column if base else None,
             token=token,
             revision=revision,
         )
         return
 
     for split_name in ds_dict.keys():
-        split_ds = ds_dict[split_name]
-        yield from _iter_rows(
-            split_ds,
-            f"{dataset_name}:{split_name}",
-            card_license or _info_license(split_ds),
-            text_col,
-            label_col,
-            dataset_name,
-        )
+        yield from rows(ds_dict[split_name], split_name)

@@ -101,21 +101,23 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
   - `hf`: list of HF datasets (**all splits** ingested by default: train, test, validation, etc.). If `datasets` can't load a repo, its data files are crawled instead.
   - `kaggle`: list of Kaggle dataset refs (license read from the dataset metadata)
   - `git`: list of Git repo URLs (shallow clone; structured data files only — docs/config files are skipped; license detected from `LICENSE`/`COPYING`)
-  - `local`: list of filesystem globs (supports `**` recursion)
+  - `local`: list of filesystem globs (supports `**` recursion); a glob that matches no files is reported
+  - Credentials: `hf_token`, `kaggle_username` / `kaggle_key` in the config win over the `HF_TOKEN` / `KAGGLE_USERNAME` / `KAGGLE_KEY` env vars
 
 - Overrides (per-source)
   - `*_overrides.<id>.text_column` — pick text field when auto-detect is wrong
   - `*_overrides.<id>.label_column` — pick label field
-  - `*_overrides.<id>.category` — annotate category into `meta.category` (a row's own `category` column wins)
+  - `*_overrides.<id>.category` — annotate category into `meta.category` (for Hugging Face rows, a `category` column already in the row wins; in files a `category` column is a label candidate)
   - `*_overrides.<id>.license` — declare the license (takes precedence over what the source reports)
-  - `hf_overrides.<id>.split` — use specific split only (e.g., `"train"`, `"test"`); an unknown split is an error
+  - `hf_overrides.<id>.split` — use specific split only (e.g., `"train"`, `"test"`); an unknown split is an error. Record ids keep the split either way (`hf:owner/ds:train:0`)
+  - `hf_overrides` keys may also be `name:split`; such an entry refines the `name` entry field by field for that split
   - `kaggle_overrides.<id>.include_globs` / `local_overrides.<id>.include_globs` — only read matching files (Kaggle reads structured files by default; list e.g. `"*.txt"` to include text files)
-  - `local_overrides` / `local_label_maps` keys are the configured glob or any path glob (e.g. `"data/security/**"`)
+  - `local_overrides` / `local_label_maps` keys are the configured glob or any path glob (e.g. `"data/security/**"`); the entry keyed by the configured glob wins, otherwise the first matching path glob
   - An empty entry (`owner/dataset:` with nothing below) means no overrides
 
 - Label normalization
   - `global_label_map` maps raw → canonical (e.g., "1" → `malicious`)
-  - `hf_label_maps` / `kaggle_label_maps` / `local_label_maps` override per dataset (HF keys may be `name` or `name:split`)
+  - `hf_label_maps` / `kaggle_label_maps` / `local_label_maps` override per dataset; an HF `name:split` map refines the `name` map
   - Map keys also match regardless of case/separators (`"Prompt Injection"` matches `prompt_injection`); `true`/`false` and `1.0` labels match `"true"`/`"false"` and `"1"`
   - **Automatic formatting**: All labels converted to `lowercase_with_underscores` format
 
@@ -125,13 +127,28 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
   - Enhanced deduplication: `near_dup_num_perm`, `near_dup_memory_limit`, `preserve_evasion_variants`, `enable_duplicate_logging`
 
 - Language detection
-  - `allowed_languages`: list of language codes (e.g., `[en, es, fr]`) or `["*"]` for all languages
-  - `language_confidence`, `fasttext_lid_path` (optional heavier model); langdetect is seeded so results are reproducible
+  - `allowed_languages`: list of language codes (e.g., `[en, es, fr]`) or `["*"]` for all languages; codes match case-insensitively by base language (`zh` also accepts `zh-cn`)
+  - `language_confidence`, `fasttext_lid_path` (optional heavier model; the file must exist); langdetect is seeded so results are reproducible
 
 - State
   - `state_dir` (default `.state`): where the per-output state files live
 
-Unknown config keys are rejected, so a typo can't silently disable a setting.
+Values are checked when the config loads; an invalid config (or command-line flag) exits with code 2 and names the setting:
+
+| Setting | Allowed values |
+|---------|----------------|
+| `language_confidence` | 0 – 1 |
+| `near_duplicate_threshold` | above 0, up to 1 (or unset) |
+| `min_entropy` | ≥ 0 |
+| `min_length` / `max_length` | ≥ 0 / ≥ 1, and `min_length` ≤ `max_length` |
+| `near_dup_num_perm` | ≥ 16 (changing it for an existing output needs `--fresh`; a warning says so) |
+| `near_dup_memory_limit` | ≥ 0 (0 = no limit) |
+| `io_workers`, `cpu_workers`, `batch_size` | ≥ 1 (or unset for automatic) |
+| `verbose` | 0, 1 or 2 |
+| `allowed_languages` | at least one code |
+| `hf` / `git` / `kaggle` / `local` entries | non-empty |
+
+Unknown config keys are rejected too, so a typo can't silently disable a setting.
 
 ### Config examples
 
@@ -307,7 +324,7 @@ Add any of these to a config; `ingestor tune` suggests values for your machine.
 io_workers: 8                          # sources downloaded in parallel
 cpu_workers: 15                        # worker processes for normalization, filters, language detection and MinHash (1 = in-process)
 batch_size: 512                        # texts per worker batch
-fasttext_lid_path: /models/lid.176.bin # faster language detection; default ./lid.176.bin (see `make setup-fasttext`)
+# fasttext_lid_path: /models/lid.176.bin  # faster language detection; the file must exist (default ./lid.176.bin, see `make setup-fasttext`)
 state_dir: /mnt/nvme/ingestor-state    # resumable state on a fast disk
 ```
 

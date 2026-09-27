@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, TypeVar, Union
 from typing import Dict as TypingDict
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .normalization import label_key
 
@@ -115,27 +115,27 @@ class IngestConfig(BaseModel):
     local: List[str] = Field(default_factory=list)
     store_raw: bool = Field(default=False)
     allowed_languages: List[str] = Field(default_factory=lambda: ["en"])
-    language_confidence: float = Field(default=0.7)
+    language_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     enforce_license: bool = Field(default=False)
     # Quality thresholds
-    min_entropy: float = Field(default=2.5)
-    min_length: int = Field(default=10)
-    max_length: int = Field(default=10000)
+    min_entropy: float = Field(default=2.5, ge=0.0)
+    min_length: int = Field(default=10, ge=0)
+    max_length: int = Field(default=10000, ge=1)
     # Fixed near-duplicate threshold; None uses the length-aware thresholds
-    near_duplicate_threshold: Optional[float] = Field(default=None)
+    near_duplicate_threshold: Optional[float] = Field(default=None, gt=0.0, le=1.0)
     # Enhanced deduplication settings
-    near_dup_num_perm: int = Field(default=256)  # MinHash permutations
-    near_dup_memory_limit: int = Field(default=1_000_000)  # Max signatures
+    near_dup_num_perm: int = Field(default=256, ge=16)  # MinHash permutations
+    near_dup_memory_limit: int = Field(default=1_000_000, ge=0)  # Max signatures; 0 = no limit
     preserve_evasion_variants: bool = Field(default=True)  # Preserve evasion
     enable_duplicate_logging: bool = Field(default=True)  # Log decisions
     # Parallelism (optional; may be auto-calculated at runtime)
-    io_workers: Optional[int] = Field(default=None)
-    cpu_workers: Optional[int] = Field(default=None)
-    batch_size: Optional[int] = Field(default=None)
+    io_workers: Optional[int] = Field(default=None, ge=1)
+    cpu_workers: Optional[int] = Field(default=None, ge=1)
+    batch_size: Optional[int] = Field(default=None, ge=1)
     # Language detection model path
     fasttext_lid_path: Optional[str] = Field(default=None)
     # Verbosity level for logging (0,1,2)
-    verbose: int = Field(default=0)
+    verbose: int = Field(default=0, ge=0, le=2)
     # Directory holding the per-output resumable state
     state_dir: str = Field(default=".state")
     hf_token: Optional[str] = Field(default=None)
@@ -183,31 +183,87 @@ class IngestConfig(BaseModel):
                 }
         return data
 
+    @field_validator("hf", "git", "kaggle", "local")
+    @classmethod
+    def _no_blank_sources(cls, sources: List[str]) -> List[str]:
+        if any(not s.strip() for s in sources):
+            raise ValueError("source entries must not be empty")
+        return sources
+
+    @field_validator("fasttext_lid_path")
+    @classmethod
+    def _model_file_exists(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        path = Path(value).expanduser()
+        if not path.is_file():
+            raise ValueError(f"file not found: {path}")
+        return str(path)
+
+    @field_validator("allowed_languages")
+    @classmethod
+    def _language_codes(cls, codes: List[str]) -> List[str]:
+        codes = [c.strip().lower() for c in codes if c.strip()]
+        if not codes:
+            raise ValueError('list at least one language code, or ["*"] for all languages')
+        return codes
+
+    @model_validator(mode="after")
+    def _length_bounds(self) -> "IngestConfig":
+        if self.min_length > self.max_length:
+            raise ValueError(
+                f"min_length ({self.min_length}) must not exceed max_length ({self.max_length})"
+            )
+        return self
+
+    def hf_override(self, spec: str, split: Optional[str] = None) -> Optional[HfOverride]:
+        """HF override; a `name:split` entry refines the `name` entry field by field."""
+        base = self.hf_overrides.get(spec)
+        specific = self.hf_overrides.get(f"{spec}:{split}") if split else None
+        if base is None or specific is None:
+            return specific or base
+        merged = {**base.model_dump(exclude_none=True), **specific.model_dump(exclude_none=True)}
+        return HfOverride(**merged)
+
     def override_for(
-        self, kind: str, keys: Sequence[str], path: Optional[str] = None
+        self, kind: str, spec: str, dataset: Optional[str] = None, path: Optional[str] = None
     ) -> Optional[Override]:
-        """Override for a source item; local overrides may also be keyed by a path glob."""
+        """Override for a source item.
+
+        `spec` is the configured source entry and `dataset` the item's `meta.dataset`
+        (`name:split` for HF). Local overrides may also be keyed by a path glob.
+        """
         if kind == "hf":
-            return lookup(self.hf_overrides, keys)
+            return self.hf_override(spec, _split_of(spec, dataset))
         if kind == "kaggle":
-            return lookup(self.kaggle_overrides, keys)
+            return self.kaggle_overrides.get(spec)
         if kind == "local":
-            return lookup(self.local_overrides, keys, path)
+            return lookup(self.local_overrides, [spec], path)
         return None
 
     def label_map_for(
-        self, kind: str, keys: Sequence[str], path: Optional[str] = None
+        self, kind: str, spec: str, dataset: Optional[str] = None, path: Optional[str] = None
     ) -> Dict[str, str]:
         """Dataset-specific label map for a source item (empty if none)."""
         if kind == "hf":
-            found = lookup(self.hf_label_maps, keys)
-        elif kind == "kaggle":
-            found = lookup(self.kaggle_label_maps, keys)
-        elif kind == "local":
-            found = lookup(self.local_label_maps, keys, path)
-        else:
-            found = None
-        return found or {}
+            # A `name:split` map refines the `name` map
+            split = _split_of(spec, dataset)
+            return {
+                **self.hf_label_maps.get(spec, {}),
+                **(self.hf_label_maps.get(f"{spec}:{split}", {}) if split else {}),
+            }
+        if kind == "kaggle":
+            return self.kaggle_label_maps.get(spec, {})
+        if kind == "local":
+            return lookup(self.local_label_maps, [spec], path) or {}
+        return {}
+
+
+def _split_of(spec: str, dataset: Optional[str]) -> Optional[str]:
+    """Split name from an HF `meta.dataset` of the form `<spec>:<split>`."""
+    if dataset and dataset.startswith(spec + ":"):
+        return dataset[len(spec) + 1:]
+    return None
 
 
 def load_config(path: Path) -> IngestConfig:

@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 from .config import IngestConfig, Override
-from .logging_utils import log_dataset, log_debug, log_error, log_success
+from .logging_utils import log_dataset, log_debug, log_error, log_success, log_warning
 from .normalization import classify_evasion, fold_typography, label_key, normalize_label
 from .prepare import Prepared, PrepareParams, init_pool_worker, init_worker, prepare_batch
-from .quality import LicenseValidator, NearDuplicateDetector
+from .quality import LicenseValidator, NearDuplicateDetector, fasttext_available
 from .sources.git import iter_git_repo
 from .sources.huggingface import iter_huggingface
 from .sources.kaggle import iter_kaggle
@@ -54,6 +54,13 @@ def _map_label(mapping: Dict[str, str], key: str) -> Optional[str]:
     return None
 
 
+def _fasttext_model_path(configured: Optional[str]) -> Optional[str]:
+    """fasttext_lid_path (existence is checked by the config); fasttext must be importable."""
+    if configured and not fasttext_available():
+        raise RuntimeError("fasttext_lid_path is set but the fasttext package can't be imported")
+    return configured
+
+
 def _completed(value: Any) -> Future:
     fut: Future = Future()
     fut.set_result(value)
@@ -84,8 +91,13 @@ class IngestPipeline:
         for url in cfg.git:
             sources.append(Source("git", url, partial(iter_git_repo, url)))
         for spec in cfg.kaggle:
-            sources.append(Source("kaggle", spec, partial(iter_kaggle, spec, cfg.kaggle_overrides.get(spec))))
+            kaggle = partial(
+                iter_kaggle, spec, cfg.kaggle_overrides.get(spec), cfg.kaggle_username, cfg.kaggle_key
+            )
+            sources.append(Source("kaggle", spec, kaggle))
         for pattern, files in expand_local_globs(cfg.local, exclude=list(exclude)):
+            if not files:
+                log_warning(f"[local] {pattern} matched no data files")
             sources.append(
                 Source("local", pattern, partial(iter_local_files, pattern, files, cfg.local_overrides))
             )
@@ -97,14 +109,15 @@ class IngestPipeline:
             yield from source.open()
 
     # ------------------------------------------------------- labels / overrides
-    def _lookup_keys(self, item: Dict) -> Tuple[str, List[str], Optional[str]]:
+    def _lookup_keys(self, item: Dict) -> Tuple[str, str, str, Optional[str]]:
+        """(kind, configured spec, meta.dataset, file path) of a source item."""
         meta = item.get("meta") or {}
-        keys = [str(meta.get("dataset") or ""), str(item.get("spec") or "")]
-        return source_kind(item), keys, meta.get("path")
+        spec = str(item.get("spec") or "")
+        return source_kind(item), spec, str(meta.get("dataset") or spec), meta.get("path")
 
     def override_for(self, item: Dict) -> Optional[Override]:
-        kind, keys, path = self._lookup_keys(item)
-        return self.config.override_for(kind, keys, path)
+        kind, spec, dataset, path = self._lookup_keys(item)
+        return self.config.override_for(kind, spec, dataset, path)
 
     def map_label(self, item: Dict) -> Optional[str]:
         """Dataset label map, then the global map, then lowercase_with_underscores."""
@@ -112,8 +125,8 @@ class IngestPipeline:
         if label is None:
             return None
         key = label_key(label)
-        kind, keys, path = self._lookup_keys(item)
-        for mapping in (self.config.label_map_for(kind, keys, path), self.config.global_label_map):
+        kind, spec, dataset, path = self._lookup_keys(item)
+        for mapping in (self.config.label_map_for(kind, spec, dataset, path), self.config.global_label_map):
             mapped = _map_label(mapping, key)
             if mapped is not None:
                 return normalize_label(mapped)
@@ -252,6 +265,7 @@ class IngestPipeline:
         when the run completes, so interrupted runs resume without losing records.
         """
         cfg = self.config
+        lid_path = _fasttext_model_path(cfg.fasttext_lid_path)
         self.approved_count = self.rejected_count = self.existing_count = self.total_records = 0
         self.failed_sources = []
         self.state_path = state_path_for(out_path, Path(cfg.state_dir))
@@ -277,7 +291,7 @@ class IngestPipeline:
             max_length=cfg.max_length,
             allowed_languages=list(cfg.allowed_languages),
             language_confidence=cfg.language_confidence,
-            fasttext_lid_path=cfg.fasttext_lid_path,
+            fasttext_lid_path=lid_path,
             num_perm=cfg.near_dup_num_perm,
         )
 

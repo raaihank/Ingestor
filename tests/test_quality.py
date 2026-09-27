@@ -147,3 +147,9 @@ def test_langdetect_is_seeded():
     outputs = {subprocess.run([sys.executable, "-c", code], capture_output=True, text=True).stdout for _ in range(3)}
     assert len(outputs) == 1
 
+
+def test_language_filter_rejects_an_empty_language_list():
+    import pytest
+
+    with pytest.raises(ValueError, match="allowed_languages"):
+        LanguageFilter(allowed_languages=[])

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 import numpy as np
 from datasketch import LeanMinHash, MinHash, MinHashLSH
 
+from .logging_utils import log_warning
 from .normalization import (
     classify_evasion,
     get_shingle_size,
@@ -38,6 +39,15 @@ except Exception:  # pragma: no cover
     detect_langs = None  # type: ignore
 
 MINHASH_SEED = 1
+
+
+def fasttext_available() -> bool:
+    return fasttext is not None
+
+
+def base_language(code: str) -> str:
+    """Case-insensitive base language code: "zh-CN" / "zh_tw" -> "zh"."""
+    return code.strip().lower().replace("_", "-").split("-")[0]
 
 
 class DuplicateResult(NamedTuple):
@@ -177,6 +187,16 @@ class EnhancedNearDuplicateDetector:
 
     def _load_existing_signatures(self) -> None:
         """Index the most recent persisted signatures (up to memory_limit)."""
+        (incompatible,) = self._db.execute(
+            "SELECT COUNT(*) FROM minhash_sig WHERE num_perm != ? OR scheme IS NULL OR scheme != ?",
+            (self.num_perm, self.scheme),
+        ).fetchone()
+        if incompatible:
+            log_warning(
+                f"{incompatible} saved near-duplicate signatures were built with other settings "
+                f"(near_dup_num_perm != {self.num_perm}); new records are not checked against them. "
+                "Run with --fresh to rebuild."
+            )
         limit = self.memory_limit if self.memory_limit > 0 else -1
         rows = self._db.execute(
             """
@@ -399,17 +419,21 @@ class LanguageFilter:
         confidence: float = 0.7,
         model_path: Optional[Path] = None,
     ) -> None:
+        if allowed_languages is not None and not allowed_languages:
+            raise ValueError('allowed_languages is empty; use ["*"] for all languages')
         # Support "*" as special marker for all languages
         if allowed_languages and "*" in allowed_languages:
             self.allowed = set(["*"])  # Special marker for all languages
         else:
-            self.allowed = set(allowed_languages or ["en"])
+            # Compared by base code, so "zh" also accepts langdetect's "zh-cn"
+            self.allowed = {base_language(code) for code in (allowed_languages or ["en"])}
         self.confidence = confidence
         self.model = None
         self.last_lang: Optional[str] = None
         self.last_conf: Optional[float] = None
         if fasttext is not None:
-            lid_path = model_path or Path(os.getenv("FASTTEXT_LID_PATH", "lid.176.bin"))
+            configured = model_path if model_path is not None else os.getenv("FASTTEXT_LID_PATH", "lid.176.bin")
+            lid_path = Path(configured).expanduser()
             if lid_path.exists():
                 try:
                     # Loading can be expensive; avoid if file missing.
@@ -430,13 +454,7 @@ class LanguageFilter:
         if self.model is not None:
             try:
                 labels, probs = self.model.predict(text, k=1)  # type: ignore
-                primary_lang = labels[0].replace("__label__", "")
-                primary_conf = float(probs[0])
-                self.last_lang, self.last_conf = primary_lang, primary_conf
-                # If "*" is in allowed, accept any language above confidence threshold
-                if "*" in self.allowed:
-                    return primary_conf >= self.confidence
-                return primary_lang in self.allowed and primary_conf >= self.confidence
+                return self._accept(labels[0].replace("__label__", ""), float(probs[0]))
             except Exception as e:
                 # Handle NumPy compatibility issues or other FastText errors
                 import logging
@@ -453,12 +471,7 @@ class LanguageFilter:
                 if not detections:
                     self.last_lang, self.last_conf = None, None
                     return False
-                primary = detections[0]
-                self.last_lang, self.last_conf = primary.lang, float(primary.prob)
-                # If "*" is in allowed, accept any language above confidence threshold
-                if "*" in self.allowed:
-                    return float(primary.prob) >= self.confidence
-                return primary.lang in self.allowed and float(primary.prob) >= self.confidence
+                return self._accept(detections[0].lang, float(detections[0].prob))
             except Exception:
                 self.last_lang, self.last_conf = None, None
                 return False
@@ -466,3 +479,10 @@ class LanguageFilter:
         # If no detectors installed, allow by default
         self.last_lang, self.last_conf = None, None
         return True
+
+    def _accept(self, lang: str, confidence: float) -> bool:
+        """Record the detection; accept an allowed language ("*" = any) above the threshold."""
+        self.last_lang, self.last_conf = lang, confidence
+        if confidence < self.confidence:
+            return False
+        return "*" in self.allowed or base_language(lang) in self.allowed

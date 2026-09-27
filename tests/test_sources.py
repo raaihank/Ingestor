@@ -251,7 +251,7 @@ def test_kaggle_dir_default_and_include_globs(tmp_path):
 
 
 def test_kaggle_download_license_and_failure(tmp_path, monkeypatch):
-    def fake_kaggle(args):
+    def fake_kaggle(args, env=None):
         if args[:2] == ["datasets", "download"]:
             target = Path(args[args.index("-p") + 1])
             with zipfile.ZipFile(target / "d.zip", "w") as z:
@@ -265,7 +265,7 @@ def test_kaggle_download_license_and_failure(tmp_path, monkeypatch):
     items = list(iter_kaggle("o/d"))
     assert [(i["raw"], i["meta"]["license"]) for i in items] == [("hello there", "CC0-1.0")]
 
-    monkeypatch.setattr(kaggle_mod, "_run_kaggle", lambda args: subprocess.CompletedProcess(args, 1, "", "403 Forbidden"))
+    monkeypatch.setattr(kaggle_mod, "_run_kaggle", lambda args, env=None: subprocess.CompletedProcess(args, 1, "", "403 Forbidden"))
     with pytest.raises(RuntimeError, match="403"):
         list(iter_kaggle("o/d"))
 
@@ -273,7 +273,7 @@ def test_kaggle_download_license_and_failure(tmp_path, monkeypatch):
 def test_kaggle_override_reaches_source(tmp_path, make_config, ingest, monkeypatch):
     seen = {}
 
-    def fake_iter_kaggle(spec, override=None):
+    def fake_iter_kaggle(spec, override=None, username=None, key=None):
         seen[spec] = override
         return iter([])
 
