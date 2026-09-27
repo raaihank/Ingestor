@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+import os
 
-import pytest
+# CI sets FORCE_COLOR, which makes rich add ANSI codes to captured output. Drop it before
+# ingestor creates its console so tests (and the CLI subprocesses they start) see plain text.
+os.environ.pop("FORCE_COLOR", None)
 
-from ingestor.config import IngestConfig
-from ingestor.pipeline import IngestPipeline
+from pathlib import Path  # noqa: E402
+from typing import Callable, Dict, List, Tuple  # noqa: E402
+
+import pytest  # noqa: E402
+
+from ingestor.config import IngestConfig  # noqa: E402
+from ingestor.pipeline import IngestPipeline  # noqa: E402
 
 
 @pytest.fixture

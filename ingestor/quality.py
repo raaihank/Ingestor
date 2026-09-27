@@ -432,8 +432,8 @@ class LanguageFilter:
         self.last_lang: Optional[str] = None
         self.last_conf: Optional[float] = None
         if fasttext is not None:
-            configured = model_path if model_path is not None else os.getenv("FASTTEXT_LID_PATH", "lid.176.bin")
-            lid_path = Path(configured).expanduser()
+            default_path = os.getenv("FASTTEXT_LID_PATH", "lid.176.bin")
+            lid_path = Path(model_path if model_path is not None else default_path).expanduser()
             if lid_path.exists():
                 try:
                     # Loading can be expensive; avoid if file missing.
