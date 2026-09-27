@@ -1,4 +1,9 @@
 config.*ml
+# Configs that may hold credentials (the bundled sample stays tracked)
+prompt_security.yaml
+*.config.yaml
+*.config.yml
+!test-data/sample.config.yaml
 hf.token
 kaggle.json
 .state/
