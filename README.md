@@ -80,45 +80,57 @@ export KAGGLE_KEY=...
 
 Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`, `label`, `meta` (and optional `raw`).
 
-> **💡 Resumable Processing**: The ingestor maintains state in `.state/ingest.sqlite` to track processed records. If your processing is interrupted or you need to restart, simply run the same command again - it will automatically resume from where it left off, skipping already processed records. This makes it safe to process large datasets over multiple sessions.
+`normalized_text` is the light view (NFC, lowercase, collapsed whitespace; zero-width/BiDi characters are kept). Use `--store-raw` to also keep the original text.
+
+> **💡 Resumable Processing**: Every accepted record — and every rejection decision — is stored in a per-output SQLite state file under `.state/` (`<output-name>-<hash>.sqlite`, directory configurable with `state_dir` / `--state-dir`). The JSONL is exported from that state when a run completes. If a run is interrupted (even killed), run the same command again: items already decided are skipped and the output ends up identical to an uninterrupted run. Different `--out` paths never share state.
 
 ### Commands
 
-- `ingestor run` — ingest sources to JSONL (flags: `--config`, `--out`, `--store-raw`, `--allowed-lang`, `--language-confidence`, `--enforce-license`, `--hf-token`, `--kaggle-username`, `--kaggle-key`, `--debug`)
-- `ingestor verify` — dry‑run preview (flags: `--config`, `--per-dataset`, `--debug`)
+- `ingestor run` — ingest sources to JSONL (flags: `--config`, `--out`, `--hf`, `--git`, `--kaggle`, `--local`, `--store-raw/--no-store-raw`, `--allowed-lang`, `--language-confidence`, `--enforce-license/--no-enforce-license`, `--hf-token`, `--kaggle-username`, `--kaggle-key`, `--io-workers`, `--cpu-workers`, `--batch-size`, `--state-dir`, `--fresh`, `--debug`). Flags override the config file; source flags add to its sources. Exits with code 1 (after writing the output) if any source failed, and 2 if no sources are configured.
+- `ingestor verify` — dry‑run preview (flags: `--config`, `--per-dataset`, `--debug`); writes no state
 - `ingestor test` — demo on bundled `test-data/`
 - `ingestor version` — show version
  - `ingestor tune` — suggest optimal `io-workers`, `cpu-workers`, and `batch-size` (flags: `--sample`, `--top-n`, `--target-batch-bytes`, `--json`)
 
-> **⚡ Idempotent Operations**: All `ingestor run` commands are idempotent - running the same command multiple times produces the same result. The system tracks processed records by their unique combination of source, source_id, and content hash, ensuring no duplicates even across multiple runs or interrupted sessions.
+> **⚡ Idempotent Operations**: Re-running `ingestor run` with the same config and output produces the same file. Records are identified by `source:source_id`; items decided by an earlier run are skipped (accepted ones are reported as `existing`, rejected ones with their original reason). Sources are consumed in config order, so the output order doesn't depend on download timing. Adding a source and re-running appends its records; to rebuild after removing a source or changing filters, pass `--fresh`.
 
 ### In‑depth configuration
 
 - Sources
-  - `hf`: list of HF datasets (**all splits** ingested by default: train, test, validation, etc.)
-  - `kaggle`: list of Kaggle dataset refs
-  - `git`: list of Git repo URLs (recurse and ingest data files)
+  - `hf`: list of HF datasets (**all splits** ingested by default: train, test, validation, etc.). If `datasets` can't load a repo, its data files are crawled instead.
+  - `kaggle`: list of Kaggle dataset refs (license read from the dataset metadata)
+  - `git`: list of Git repo URLs (shallow clone; structured data files only — docs/config files are skipped; license detected from `LICENSE`/`COPYING`)
   - `local`: list of filesystem globs (supports `**` recursion)
 
 - Overrides (per-source)
   - `*_overrides.<id>.text_column` — pick text field when auto-detect is wrong
   - `*_overrides.<id>.label_column` — pick label field
-  - `*_overrides.<id>.category` — annotate category into `meta.category`
-  - `*_overrides.<id>.split` — use specific split only (e.g., `"train"`, `"test"`)
-  - `kaggle_overrides.<id>.include_globs` — restrict to data files
+  - `*_overrides.<id>.category` — annotate category into `meta.category` (a row's own `category` column wins)
+  - `*_overrides.<id>.license` — declare the license (takes precedence over what the source reports)
+  - `hf_overrides.<id>.split` — use specific split only (e.g., `"train"`, `"test"`); an unknown split is an error
+  - `kaggle_overrides.<id>.include_globs` / `local_overrides.<id>.include_globs` — only read matching files (Kaggle reads structured files by default; list e.g. `"*.txt"` to include text files)
+  - `local_overrides` / `local_label_maps` keys are the configured glob or any path glob (e.g. `"data/security/**"`)
+  - An empty entry (`owner/dataset:` with nothing below) means no overrides
 
 - Label normalization
   - `global_label_map` maps raw → canonical (e.g., "1" → `malicious`)
-  - `hf_label_maps` / `kaggle_label_maps` / `local_label_maps` override per dataset
+  - `hf_label_maps` / `kaggle_label_maps` / `local_label_maps` override per dataset (HF keys may be `name` or `name:split`)
+  - Map keys also match regardless of case/separators (`"Prompt Injection"` matches `prompt_injection`); `true`/`false` and `1.0` labels match `"true"`/`"false"` and `"1"`
   - **Automatic formatting**: All labels converted to `lowercase_with_underscores` format
 
 - Quality thresholds
-  - `min_entropy`, `min_length`, `max_length`, `near_duplicate_threshold`
+  - `min_entropy`, `min_length`, `max_length`
+  - `near_duplicate_threshold`: fixed similarity threshold; leave unset for the length-aware thresholds below
   - Enhanced deduplication: `near_dup_num_perm`, `near_dup_memory_limit`, `preserve_evasion_variants`, `enable_duplicate_logging`
 
 - Language detection
   - `allowed_languages`: list of language codes (e.g., `[en, es, fr]`) or `["*"]` for all languages
-  - `language_confidence`, `fasttext_lid_path` (optional heavier model)
+  - `language_confidence`, `fasttext_lid_path` (optional heavier model); langdetect is seeded so results are reproducible
+
+- State
+  - `state_dir` (default `.state`): where the per-output state files live
+
+Unknown config keys are rejected, so a typo can't silently disable a setting.
 
 ### Logging UX
 
@@ -129,8 +141,10 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
 ### Performance tuning (parallel)
 
 - Two-stage concurrency:
-  - IO pool (threads): fetch/iterate sources in parallel (HF/Git/Kaggle/local)
-  - CPU pool (processes): normalize → quality → hash → dedupe in batches
+  - IO threads: fetch/iterate up to `io-workers` sources in parallel (HF/Git/Kaggle/local), consumed in config order
+  - CPU pool (processes): normalize → hash → entropy/length/language filters → MinHash signature, in batches
+  - Main process: dedupe against the state database and store records
+  - `--cpu-workers 1` runs the CPU stage in-process (no pool)
 - Auto worker sizing:
   - io-workers: min(32, 4×CPU cores)
   - cpu-workers: max(1, CPU cores − 1)
@@ -222,8 +236,13 @@ The system maintains **two normalized versions** of each text:
   - Used for near-duplicate detection to avoid collapsing attack variants
 
 - **Heavy View (`text_heavy`)**: Uses aggressive normalization (NFKC + homoglyph mapping + transliteration) 
-  - Catches true exact duplicates across different encodings
-  - Used for exact duplicate hashing and cross-run persistence
+  - Catches duplicates that differ only in encoding; its hash is the output `prompt_hash`
+
+#### 🧮 **Exact Duplicates (content-level, across all sources)**
+
+- With `preserve_evasion_variants: true` (default), a record whose light text was already accepted — from any source — is dropped as `duplicate_exact`
+- A record with the same heavy text but a different light text (homoglyphs, zero-width/BiDi characters, compatibility forms) is kept and annotated as an evasion variant
+- With `preserve_evasion_variants: false`, the heavy text decides, so such variants collapse into one record
 
 #### 🧠 **Enhanced Near-Duplicate Detection**
 
@@ -231,19 +250,20 @@ The system maintains **two normalized versions** of each text:
   - Short texts (<40 chars): 3-grams with 95% threshold
   - Medium texts (40-200 chars): 4-grams with 91% threshold  
   - Long texts (>200 chars): 5-grams with 89% threshold
+  - `near_duplicate_threshold` replaces these with one fixed threshold
 
-- **Evasion-Aware Exemptions**: Automatically detects and preserves evasion variants
+- **Evasion-Aware Exemptions**: a near-duplicate of an accepted record is kept (and annotated) when the difference is an evasion technique
   - Zero-width character insertions (ZWSP, ZWJ, etc.)
   - BiDi override attacks (RLO/LRO)
-  - Base64/hex encoding wraps
   - Mixed-script homoglyph substitutions
+  - Base64/hex encoded payload tokens
 
-- **Label-Aware Deduplication**: Preserves evasion variants while removing true duplicates
+- The most similar accepted record decides; otherwise the record is dropped as `near_duplicate`
 
 #### 🗄️ **Persistent State Management**
 
-- **Cross-Run Memory**: MinHash signatures persist in SQLite database
-- **Memory Management**: Configurable in-memory signature limit (default: 1M signatures)
+- **Cross-Run Memory**: MinHash signatures (with their text) persist in the output's state database and are reloaded on the next run
+- **Memory Management**: at most `near_dup_memory_limit` signatures are indexed in memory; the oldest are evicted first
 - **Audit Logging**: Complete duplicate detection log for analysis and debugging
 
 #### ⚙️ **Configuration Options**
@@ -277,22 +297,27 @@ The system automatically adds metadata to preserved records:
 Access detailed duplicate detection logs:
 
 ```python
-# View duplicate detection statistics
-from ingestor.quality import EnhancedNearDuplicateDetector
+# View duplicate detection statistics for an output file
+from pathlib import Path
 
-detector = EnhancedNearDuplicateDetector()
+from ingestor.quality import EnhancedNearDuplicateDetector
+from ingestor.state import state_path_for
+
+state = state_path_for(Path("data/unified.jsonl"), Path(".state"))
+detector = EnhancedNearDuplicateDetector(state_db_path=state)
 stats = detector.get_duplicate_stats()
 print(stats)
 # {
+#   'exact_duplicate': {'count': 4210, 'avg_similarity': 1.0},
 #   'near_duplicate': {'count': 1250, 'avg_similarity': 0.94},
 #   'evasion_variant_kept': {'count': 89, 'avg_similarity': 0.97}
 # }
 ```
 
 The duplicate log table (`duplicate_log`) contains:
-- `kept_id`, `dropped_id`: Which records were kept vs dropped
-- `jaccard`: Similarity score
-- `reason`: Why decision was made (near_duplicate, evasion_variant)
+- `kept_id`, `dropped_id`: The record already accepted, and the record checked against it (dropped, or kept as a variant)
+- `jaccard`: Similarity score (1.0 for exact duplicates and same-heavy-text variants)
+- `reason`: Why decision was made (exact_duplicate, near_duplicate, evasion_variant_kept)
 - `label_kept`, `label_dropped`: Original labels
 - `source_kept`, `source_dropped`: Data sources
 - `evasion_type`: Type of evasion detected
@@ -302,7 +327,7 @@ The duplicate log table (`duplicate_log`) contains:
 1. **Preserves Attack Diversity**: Keeps evasion variants that traditional dedup would collapse
 2. **Reduces False Positives**: Avoids over-merging short prompts or under-merging long ones
 3. **Full Auditability**: Complete logging enables analysis of deduplication decisions
-4. **Cross-Run Consistency**: Persistent state ensures reproducible results
+4. **Cross-Run Consistency**: Persistent state and a fixed processing order make results reproducible
 
 This enhanced system is specifically tuned for security datasets where preserving the full spectrum of attack techniques is crucial for robust model training.
 
@@ -313,11 +338,12 @@ This enhanced system is specifically tuned for security datasets where preservin
 - Missing columns: use `*_overrides` to set `text_column`/`label_column`, then re‑run `ingestor verify`
 - FastText NumPy compatibility: The project pins NumPy <2.0 for FastText compatibility. If you encounter NumPy 2.x issues, reinstall with `pip install -e .`
 
-> **🔄 State Management**: To start fresh or fix corrupted state, delete the `.state/` directory (`rm -rf .state/`). The ingestor will rebuild the state database on the next run. This is useful when:
-> - Changing dataset configurations (sources, overrides, quality thresholds)
+> **🔄 State Management**: To rebuild an output from scratch, run with `--fresh` (it discards only that output's state file). Records already in the state are kept on re-runs even if the config changed, so use `--fresh` when:
+> - Removing sources or changing overrides, label maps or quality thresholds
 > - Troubleshooting duplicate detection issues
-> - Starting a completely new dataset collection
-> - Recovering from interrupted processing with state corruption
+> - Recovering from a corrupted state file
+>
+> State files from older versions (`.state/ingest.sqlite`, `.state/near_dup_sigs.sqlite`) are no longer used and can be deleted.
 
 Default logging shows a spinner per dataset with green approved/red rejected counts. HuggingFace dataset loading messages are suppressed for cleaner output. Add `--debug` for detailed logs including HuggingFace verbose messages.
 
@@ -343,6 +369,7 @@ local_overrides:
     text_column: text
     label_column: label
     category: prompt_injection
+    license: MIT  # local files carry no license; declare one for enforce_license
 
 # Dataset-specific label maps (override global)
 hf_label_maps: {}
@@ -353,10 +380,13 @@ local_label_maps: {}
 min_entropy: 2.5
 min_length: 10
 max_length: 10000
-near_duplicate_threshold: 0.85
+near_duplicate_threshold: null  # null = length-aware thresholds; a number = fixed threshold
 
 # Language detection
 fasttext_lid_path: null
+
+# Resumable state location
+state_dir: .state
 ```
 
 ### Processing flow
@@ -364,43 +394,46 @@ fasttext_lid_path: null
 ```mermaid
 flowchart TB
   A["HF Datasets"] --> B
-  A2["HF Repo Crawl"] --> B
+  A2["HF Repo Crawl<br/>(fallback)"] --> B
   K["Kaggle"] --> B
   G["Git"] --> B
   L["Local"] --> B
-  B["Source Readers<br/>(stream/recursive)"] --> C["Two-View Normalize<br/>Light + Heavy"]
+  B["Source Readers<br/>(stream/recursive, config order)"] --> R{"Already in<br/>output state?"}
+  R -->|yes| X0["Skip (existing)"]
+  R -->|no| C["Two-View Normalize<br/>Light + Heavy"]
   C --> D["Quality Filters<br/>entropy/length/language"]
-  D --> E1["Exact Dup Check<br/>(Heavy view + SQLite)"]
-  E1 -->|duplicate| X1["Drop"]
+  D --> LIC["License Check<br/>(if enforced)"]
+  LIC --> E1["Exact Dup Check<br/>(content hash, all sources)"]
+  E1 -->|duplicate| X1["Drop<br/>(Log decision)"]
+  E1 -->|same heavy text| K1["Keep<br/>(Mark as evasion variant)"]
   E1 -->|unique| E2["Enhanced Near-Dup<br/>(Light view + MinHash LSH)"]
-  E2 -->|evasion variant| K1["Keep Both<br/>(Mark as evasion variant)"]
+  E2 -->|evasion variant| K1
   E2 -->|near duplicate| X2["Drop<br/>(Log decision)"]
   E2 -->|unique| K2["Keep"]
-  K1 --> F["Label Map + Category<br/>(Add metadata)"]
-  K2 --> F
-  F --> S["State Store<br/>SQLite (batched)"]
-  S --> W["Writer<br/>(orjson JSONL, atomic)"]
+  K1 --> S["State Store<br/>SQLite per output"]
+  K2 --> S
+  S --> W["Writer<br/>(export on completion, atomic)"]
   W --> O["unified.jsonl"]
 ```
 
 #### How it works
 
-- **Source readers**: Stream HF/Kaggle splits or crawl Git/local paths, parse supported file types, and attach `meta.dataset`/`meta.split` (and license when available).
+- **Source readers**: Stream HF/Kaggle splits or crawl Git/local paths, parse supported file types, and attach `meta.dataset`/`meta.split` (and license when available). Sources download in parallel but are processed in config order.
 
 - **Two-view normalization**: Apply both light normalization (NFC + lowercase + whitespace) and heavy normalization (NFKC + homoglyph + transliteration) to preserve evasion variants while catching exact duplicates.
 
-- **Quality filters**: Reject by entropy, length bounds, and language detection with configurable thresholds using light normalization.
+- **Quality filters**: Reject by entropy, length bounds, and language detection with configurable thresholds using light normalization (in parallel worker processes).
 
-- **Exact duplicate check**: Use heavy normalization hash with SQLite state store for cross-run idempotency by `(source, source_id, prompt_hash)`.
+- **Exact duplicate check**: Compare content hashes against every record already accepted for this output, from any source.
 
 - **Enhanced near-duplicate detection**: 
   - Use light normalization with length-aware MinHash LSH
-  - Preserve evasion variants (zero-width, BiDi, encoding wraps)
+  - Preserve evasion variants (zero-width, BiDi, homoglyphs, encoded payloads)
   - Log all decisions for auditing
 
 - **Label + category**: Map raw labels to canonical set, annotate `meta.category` and special metadata for preserved variants.
 
-- **State persistence**: Both exact duplicates (SQLite) and near-duplicate signatures (SQLite) persist across runs with batched writes and WAL mode.
+- **State persistence**: Records, near-duplicate signatures and the duplicate log live in one SQLite file per output (WAL mode), committed together in batches. An interrupted run loses at most the last uncommitted batch, which the next run redoes.
 
-- **Writer**: Batch-serialize with orjson and `writelines` to temp file, then atomically replace target JSONL with enhanced metadata annotations.
+- **Writer**: When the run completes, stream every stored record (orjson) to a temp file, fsync, then atomically replace the target JSONL.
 
