@@ -14,7 +14,7 @@ global_label_map:
 
 local_overrides:
   "test-data/**":
-    text_column: text
+    # No text_column: the demo files use "text", "prompt" and "content", which are auto-detected
     label_column: label
     category: prompt_injection_demo
 

@@ -2,30 +2,42 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sqlite3
-from collections import Counter
-from dataclasses import dataclass
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, NamedTuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
-from datasketch import MinHash, MinHashLSH
+import numpy as np
+from datasketch import LeanMinHash, MinHash, MinHashLSH
 
 from .normalization import (
-    normalize_text_light,
-    has_evasion_markers,
+    classify_evasion,
     get_shingle_size,
-    get_similarity_threshold
+    get_similarity_threshold,
+    normalize_text_light,
+    shingles,
 )
+from .state import connect
 
 try:
     import fasttext  # type: ignore
+
+    # load_model prints a deprecation notice on every load
+    fasttext.FastText.eprint = lambda *args, **kwargs: None  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     fasttext = None  # type: ignore
 
 try:
-    from langdetect import detect_langs  # type: ignore
+    from langdetect import DetectorFactory, detect_langs  # type: ignore
+
+    # langdetect is randomized unless seeded; seed it for reproducible runs
+    DetectorFactory.seed = 0
 except Exception:  # pragma: no cover
     detect_langs = None  # type: ignore
+
+MINHASH_SEED = 1
 
 
 class DuplicateResult(NamedTuple):
@@ -56,47 +68,67 @@ def validate_length(text: str, min_len: int = 10, max_len: int = 10000) -> bool:
     return True
 
 
+def new_minhash_template(num_perm: int) -> MinHash:
+    """Empty MinHash whose permutations are shared by every signature built from it."""
+    return MinHash(num_perm=num_perm, seed=MINHASH_SEED)
+
+
+def minhash_signature(text_light: str, template: MinHash) -> np.ndarray:
+    """MinHash hash values of a light-normalized text, using length-aware shingles."""
+    minhash = template.copy()
+    grams = shingles(text_light, get_shingle_size(len(text_light)))
+    minhash.update_batch([g.encode("utf-8") for g in grams])
+    return np.asarray(minhash.hashvalues)
+
+
+class _Kept(NamedTuple):
+    text: str
+    label: str
+    source: str
+
+
 @dataclass
 class EnhancedNearDuplicateDetector:
-    """Enhanced near-duplicate detector with evasion awareness and
-    label-aware deduplication."""
+    """Enhanced near-duplicate detector with evasion awareness.
+
+    Signatures, their texts and the duplicate log are persisted in SQLite. Pass `conn`
+    to share a connection (the owner commits); otherwise the detector opens
+    `state_db_path` and commits in batches (call `commit()` when done).
+    """
 
     # Configuration
     num_perm: int = 256  # Increased from 128 for better accuracy
     state_db_path: Optional[Path] = None
-    memory_limit: int = 1_000_000  # Max signatures to keep in memory
+    memory_limit: int = 1_000_000  # Max signatures kept in the in-memory index
+    threshold: Optional[float] = None  # Fixed threshold; None = length-aware
+    preserve_evasion_variants: bool = True
+    enable_logging: bool = True
+    conn: Optional[sqlite3.Connection] = None
+    commit_every: int = 1000
+    signatures: "OrderedDict[str, np.ndarray]" = field(default_factory=OrderedDict, init=False)
 
     def __post_init__(self) -> None:
-        # LSH forest for similarity search
-        # Lower threshold, we'll filter later
-        self.lsh = MinHashLSH(threshold=0.8, num_perm=self.num_perm)
+        self._owns_conn = self.conn is None
+        if self.conn is None:
+            if self.state_db_path is None:
+                self.state_db_path = Path(".state/near_dup_sigs.sqlite")
+            self.conn = connect(self.state_db_path)
+        self._db: sqlite3.Connection = self.conn
+        self._pending = 0
 
-        # In-memory signature storage
-        self.seen_hashes: Dict[str, MinHash] = {}
-        self.doc_metadata: Dict[str, Dict] = {}  # Store metadata for each doc
+        self._template = new_minhash_template(self.num_perm)
+        self.scheme = self._template.scheme
+        self._dtype = self._template.hashvalues.dtype
+        # Candidate search runs below the decision threshold; candidates are re-checked
+        lsh_threshold = 0.8 if self.threshold is None else max(0.3, min(0.8, self.threshold - 0.1))
+        self.lsh = MinHashLSH(threshold=lsh_threshold, num_perm=self.num_perm)
 
-        # Set up persistent state database
-        if self.state_db_path is None:
-            self.state_db_path = Path(".state/near_dup_sigs.sqlite")
-
-        self.state_db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
         self._load_existing_signatures()
 
     def _init_db(self) -> None:
-        """Initialize SQLite database for persistent signatures."""
-        self._conn = sqlite3.connect(self.state_db_path)
-
-        # Optimize for our use case
-        try:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=OFF")
-            self._conn.execute("PRAGMA cache_size=-50000")  # 50MB cache
-        except Exception:
-            pass
-
-        # Create tables
-        self._conn.execute("""
+        """Create the signature and duplicate-log tables."""
+        self._db.execute("""
             CREATE TABLE IF NOT EXISTS minhash_sig (
                 doc_id TEXT PRIMARY KEY,
                 source TEXT NOT NULL,
@@ -104,21 +136,28 @@ class EnhancedNearDuplicateDetector:
                 len_bucket INTEGER NOT NULL,
                 text_length INTEGER NOT NULL,
                 num_perm INTEGER NOT NULL,
-                sig BLOB NOT NULL
+                sig BLOB NOT NULL,
+                scheme TEXT,
+                text TEXT
             )
         """)
-        
-        self._conn.execute("""
+        # Databases written by older versions lack these columns
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(minhash_sig)")}
+        for column in ("scheme", "text"):
+            if column not in columns:
+                self._db.execute(f"ALTER TABLE minhash_sig ADD COLUMN {column} TEXT")
+
+        self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_minhash_source
             ON minhash_sig(source)
         """)
 
-        self._conn.execute("""
+        self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_minhash_label
             ON minhash_sig(label, len_bucket)
         """)
 
-        self._conn.execute("""
+        self._db.execute("""
             CREATE TABLE IF NOT EXISTS duplicate_log (
                 kept_id TEXT NOT NULL,
                 dropped_id TEXT NOT NULL,
@@ -133,58 +172,46 @@ class EnhancedNearDuplicateDetector:
                 PRIMARY KEY (kept_id, dropped_id)
             )
         """)
-
-        self._conn.commit()
+        if self._owns_conn:
+            self._db.commit()
 
     def _load_existing_signatures(self) -> None:
-        """Load existing signatures from database into memory (up to limit)."""
-        cursor = self._conn.execute("""
-            SELECT doc_id, sig, source, label, text_length, len_bucket
-            FROM minhash_sig
-            ORDER BY rowid
+        """Index the most recent persisted signatures (up to memory_limit)."""
+        limit = self.memory_limit if self.memory_limit > 0 else -1
+        rows = self._db.execute(
+            """
+            SELECT doc_id, sig FROM minhash_sig
+            WHERE num_perm = ? AND scheme = ?
+            ORDER BY rowid DESC
             LIMIT ?
-        """, (self.memory_limit,))
+            """,
+            (self.num_perm, self.scheme, limit),
+        ).fetchall()
+        for doc_id, blob in reversed(rows):
+            hashvalues = np.frombuffer(blob, dtype=self._dtype)
+            if len(hashvalues) == self.num_perm:
+                self._index(doc_id, hashvalues)
 
-        for row in cursor:
-            (doc_id, sig_blob, source, label,
-             text_length, len_bucket) = row
+    def _lean(self, hashvalues: np.ndarray) -> LeanMinHash:
+        return LeanMinHash(seed=MINHASH_SEED, hashvalues=hashvalues, scheme=self.scheme)
 
-            # Reconstruct MinHash from stored bytes
-            minhash = MinHash(num_perm=self.num_perm)
-            # Assuming sig_blob contains the hash values as bytes
-            # In real implementation, you'd need to properly serialize/deserialize
+    def _index(self, doc_id: str, hashvalues: np.ndarray) -> None:
+        """Add a signature to the in-memory index, evicting the oldest past memory_limit."""
+        if doc_id in self.signatures:
+            return
+        if self.memory_limit > 0 and len(self.signatures) >= self.memory_limit:
+            oldest, _ = self.signatures.popitem(last=False)
+            self.lsh.remove(oldest)
+        self.signatures[doc_id] = hashvalues
+        self.lsh.insert(doc_id, self._lean(hashvalues), check_duplication=False)
 
-            self.seen_hashes[doc_id] = minhash
-            self.doc_metadata[doc_id] = {
-                'source': source,
-                'label': label,
-                'text_length': text_length,
-                'len_bucket': len_bucket
-            }
-
-            # Add to LSH
-            self.lsh.insert(doc_id, minhash)
-
-    def create_minhash(self, text: str, k: Optional[int] = None) -> MinHash:
-        """Create MinHash with length-aware shingles."""
-        text_light = normalize_text_light(text)
-
-        if k is None:
-            k = get_shingle_size(len(text_light))
-
-        minhash = MinHash(num_perm=self.num_perm)
-
-        # Create k-gram shingles
-        for i in range(max(0, len(text_light) - k + 1)):
-            shingle = text_light[i:i + k]
-            minhash.update(shingle.encode('utf-8'))
-
-        return minhash
+    def signature(self, text_light: str) -> np.ndarray:
+        return minhash_signature(text_light, self._template)
 
     def is_duplicate(self, text: str, doc_id: str, source: str,
                      label: str) -> DuplicateResult:
         """
-        Enhanced duplicate detection with evasion awareness and label checking.
+        Enhanced duplicate detection with evasion awareness.
 
         Args:
             text: Raw text to check
@@ -196,145 +223,116 @@ class EnhancedNearDuplicateDetector:
             DuplicateResult with detailed information
         """
         text_light = normalize_text_light(text)
+        return self.check(doc_id, text_light, self.signature(text_light), source, label)
+
+    def check(self, doc_id: str, text_light: str, hashvalues: np.ndarray,
+              source: str, label: str) -> DuplicateResult:
+        """Compare a precomputed signature against the index; index it if it is unique."""
         text_length = len(text_light)
-        len_bucket = (
-            0 if text_length < 40
-            else 1 if text_length <= 200
-            else 2
-        )
+        threshold = self.threshold if self.threshold is not None else get_similarity_threshold(text_length)
+        hv = np.asarray(hashvalues, dtype=self._dtype)
 
-        # Create MinHash
+        # Most similar indexed document above the threshold (ties -> smallest id)
+        best_id: Optional[str] = None
+        best_sim = -1.0
+        for candidate in self.lsh.query(self._lean(hv)):
+            other = self.signatures.get(candidate)
+            if candidate == doc_id or other is None:
+                continue
+            sim = float(np.count_nonzero(other == hv)) / self.num_perm
+            if sim < threshold:
+                continue
+            if best_id is None or sim > best_sim or (sim == best_sim and candidate < best_id):
+                best_id, best_sim = candidate, sim
+
+        if best_id is None:
+            self.add(doc_id, text_light, hv, source, label)
+            return DuplicateResult(is_duplicate=False, similarity=0.0)
+
+        kept = self._kept(best_id)
         k = get_shingle_size(text_length)
-        minhash = self.create_minhash(text, k)
-
-        # Query LSH for similar documents
-        similar_docs = self.lsh.query(minhash)
-        threshold = get_similarity_threshold(text_length)
-        
-        for similar_doc_id in similar_docs:
-            if similar_doc_id not in self.seen_hashes:
-                continue
-
-            similar_minhash = self.seen_hashes[similar_doc_id]
-            similar_meta = self.doc_metadata[similar_doc_id]
-            jaccard_sim = minhash.jaccard(similar_minhash)
-
-            # Skip if below threshold
-            if jaccard_sim < threshold:
-                continue
-
-            # Check for evasion variants
-            # Would need to store this too for evasion check
-            similar_text = ""
-            is_evasion, evasion_type = has_evasion_markers(
-                text_light, similar_text
-            )
-            
-            if is_evasion:
-                # Don't collapse evasion variants - keep both
-                self._log_duplicate(
-                    kept_id=similar_doc_id,
-                    dropped_id=doc_id, 
-                    jaccard=jaccard_sim,
-                    k=k,
-                    reason="evasion_variant_kept",
-                    label_kept=similar_meta['label'],
-                    label_dropped=label,
-                    source_kept=similar_meta['source'],
-                    source_dropped=source,
-                    evasion_type=evasion_type
-                )
-                
-                return DuplicateResult(
-                    is_duplicate=False,
-                    similarity=jaccard_sim,
-                    duplicate_of=similar_doc_id,
-                    reason="evasion_variant",
-                    evasion_type=evasion_type
-                )
-            
-            # High similarity - this is a duplicate
-            self._log_duplicate(
-                kept_id=similar_doc_id,
-                dropped_id=doc_id,
-                jaccard=jaccard_sim,
-                k=k,
-                reason="near_duplicate",
-                label_kept=similar_meta['label'],
-                label_dropped=label,
-                source_kept=similar_meta['source'], 
-                source_dropped=source
-            )
-            
+        evasion_type = classify_evasion(kept.text, text_light) if self.preserve_evasion_variants else ""
+        if evasion_type:
+            # Don't collapse evasion variants - keep both
+            self.log_duplicate(best_id, doc_id, best_sim, k, "evasion_variant_kept",
+                               kept.label, label, kept.source, source, evasion_type)
             return DuplicateResult(
-                is_duplicate=True,
-                similarity=jaccard_sim,
-                duplicate_of=similar_doc_id,
-                reason="near_duplicate"
+                is_duplicate=False,
+                similarity=best_sim,
+                duplicate_of=best_id,
+                reason="evasion_variant",
+                evasion_type=evasion_type,
             )
-        
-        # Not a duplicate - add to LSH and storage
-        self._add_signature(
-            doc_id, minhash, source, label, text_length, len_bucket
-        )
 
+        self.log_duplicate(best_id, doc_id, best_sim, k, "near_duplicate",
+                           kept.label, label, kept.source, source)
         return DuplicateResult(
-            is_duplicate=False,
-            similarity=0.0
+            is_duplicate=True,
+            similarity=best_sim,
+            duplicate_of=best_id,
+            reason="near_duplicate",
         )
 
-    def _add_signature(self, doc_id: str, minhash: MinHash, source: str,
-                      label: str, text_length: int,
-                      len_bucket: int) -> None:
-        """Add new signature to LSH and persistent storage."""
+    def _kept(self, doc_id: str) -> _Kept:
+        row = self._db.execute(
+            "SELECT text, label, source FROM minhash_sig WHERE doc_id = ?", (doc_id,)
+        ).fetchone()
+        if row is None:
+            return _Kept("", "unknown", "unknown")
+        return _Kept(row[0] or "", row[1], row[2])
 
-        # Check memory limit
-        if len(self.seen_hashes) >= self.memory_limit:
-            # In production, implement LRU eviction or sharding
-            pass
-
-        # Add to in-memory structures
-        self.seen_hashes[doc_id] = minhash
-        self.doc_metadata[doc_id] = {
-            'source': source,
-            'label': label,
-            'text_length': text_length,
-            'len_bucket': len_bucket
-        }
-
-        # Add to LSH
-        self.lsh.insert(doc_id, minhash)
-
-        # Persist to database
-        # Note: In real implementation, you'd properly serialize the MinHash
-        sig_blob = bytes(128)  # Placeholder - would serialize minhash.hashvalues
-
-        self._conn.execute("""
+    def add(self, doc_id: str, text_light: str, hashvalues: np.ndarray,
+            source: str, label: str) -> None:
+        """Persist and index a signature."""
+        text_length = len(text_light)
+        len_bucket = 0 if text_length < 40 else 1 if text_length <= 200 else 2
+        self._db.execute(
+            """
             INSERT OR REPLACE INTO minhash_sig
-            (doc_id, source, label, len_bucket, text_length,
-             num_perm, sig)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (doc_id, source, label, len_bucket, text_length,
-              self.num_perm, sig_blob))
-        self._conn.commit()
+            (doc_id, source, label, len_bucket, text_length, num_perm, sig, scheme, text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (doc_id, source, label, len_bucket, text_length, self.num_perm,
+             np.ascontiguousarray(hashvalues, dtype=self._dtype).tobytes(), self.scheme, text_light),
+        )
+        self._index(doc_id, np.asarray(hashvalues, dtype=self._dtype))
+        self._wrote()
 
-    def _log_duplicate(self, kept_id: str, dropped_id: str, jaccard: float,
+    def log_duplicate(self, kept_id: str, dropped_id: str, jaccard: float,
                       k: int, reason: str, label_kept: str, label_dropped: str,
                       source_kept: str, source_dropped: str,
                       evasion_type: str = "") -> None:
         """Log duplicate detection for auditing."""
-        self._conn.execute("""
+        if not self.enable_logging:
+            return
+        self._db.execute("""
             INSERT OR REPLACE INTO duplicate_log
             (kept_id, dropped_id, jaccard, k, reason, label_kept, label_dropped,
              source_kept, source_dropped, evasion_type)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (kept_id, dropped_id, jaccard, k, reason, label_kept, label_dropped,
               source_kept, source_dropped, evasion_type))
-        self._conn.commit()
+        self._wrote()
+
+    def _wrote(self) -> None:
+        if not self._owns_conn:
+            return
+        self._pending += 1
+        if self._pending >= self.commit_every:
+            self.commit()
+
+    def commit(self) -> None:
+        self._db.commit()
+        self._pending = 0
+
+    def close(self) -> None:
+        if self._owns_conn:
+            self.commit()
+            self._db.close()
 
     def get_duplicate_stats(self) -> Dict:
         """Get statistics about duplicates found."""
-        cursor = self._conn.execute("""
+        cursor = self._db.execute("""
             SELECT reason, COUNT(*) as count, AVG(jaccard) as avg_similarity
             FROM duplicate_log
             GROUP BY reason
@@ -350,27 +348,48 @@ class EnhancedNearDuplicateDetector:
 # Alias for backward compatibility - use enhanced version
 NearDuplicateDetector = EnhancedNearDuplicateDetector
 
+APPROVED_LICENSES = frozenset({
+    "mit",
+    "apache-2.0",
+    "bsd-3-clause",
+    "cc0-1.0",
+    "cc-by-4.0",
+    "cc-by-sa-4.0",
+    "unlicense",
+})
+
+_LICENSE_ALIASES = {
+    "mit license": "mit",
+    "the mit license": "mit",
+    "apache2": "apache-2.0",
+    "apache-2": "apache-2.0",
+    "apache license 2.0": "apache-2.0",
+    "apache license, version 2.0": "apache-2.0",
+    "cc0": "cc0-1.0",
+    "cc0: public domain": "cc0-1.0",
+    "public domain (cc0)": "cc0-1.0",
+    "the unlicense": "unlicense",
+    "attribution 4.0 international (cc by 4.0)": "cc-by-4.0",
+    "attribution-sharealike 4.0 international (cc by-sa 4.0)": "cc-by-sa-4.0",
+}
+
+
+def canonical_license(value: Any) -> str:
+    """Lowercase SPDX-style id for a license string ("Apache 2.0" -> "apache-2.0")."""
+    name = re.sub(r"[\s_]+", " ", str(value).strip().lower())
+    name = _LICENSE_ALIASES.get(name, name)
+    return name.replace(" ", "-")
+
 
 class LicenseValidator:
     def __init__(self) -> None:
-        self.approved_licenses = {
-            "MIT",
-            "Apache-2.0",
-            "BSD-3-Clause",
-            "CC0-1.0",
-            "CC-BY-4.0",
-            "CC-BY-SA-4.0",
-            "Unlicense",
-        }
-        self.rejected_licenses = {"GPL-3.0", "CC-BY-NC", "PROPRIETARY", "UNKNOWN"}
+        self.approved_licenses = set(APPROVED_LICENSES)
 
     def validate_source_license(self, source_metadata: Dict) -> bool:
-        license_id = source_metadata.get("license", "UNKNOWN")
-        if license_id in self.approved_licenses:
-            return True
-        if license_id in self.rejected_licenses:
-            return False
-        return False
+        """True if the source license (or any of several) is approved; unknown is rejected."""
+        value = source_metadata.get("license")
+        values: List[Any] = list(value) if isinstance(value, (list, tuple)) else [value]
+        return any(v and canonical_license(v) in self.approved_licenses for v in values)
 
 
 class LanguageFilter:
@@ -447,4 +466,3 @@ class LanguageFilter:
         # If no detectors installed, allow by default
         self.last_lang, self.last_conf = None, None
         return True
-

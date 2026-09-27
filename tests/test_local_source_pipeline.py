@@ -29,7 +29,7 @@ def test_pipeline_local_only(tmp_path: Path, monkeypatch):
         hf=[], git=[], kaggle=[], local=[str(tmp_path / "*.jsonl")],
         store_raw=False, allowed_languages=["en"], language_confidence=0.0,
         enforce_license=False, min_entropy=0.0, min_length=0, max_length=100000,
-        near_duplicate_threshold=0.90,
+        near_duplicate_threshold=0.90, state_dir=str(tmp_path / ".state"),
     )
     # Create simple local data
     f = tmp_path / "data.jsonl"

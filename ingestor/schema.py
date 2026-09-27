@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, Optional, Tuple
 
@@ -26,40 +27,54 @@ LABEL_CANDIDATE_COLUMNS = [
     "y",
 ]
 
+# Row identifiers: never part of the sample text
+ID_COLUMNS = {"id", "_id", "idx", "index", "uuid", "guid"}
 
-def extract_text_and_label(row: Dict[str, Any]) -> Tuple[Optional[str], Optional[Any]]:
-    # Prefer explicit text-like columns
-    text: Optional[str] = None
-    for key in TEXT_CANDIDATE_COLUMNS:
-        if key in row and row[key] not in (None, ""):
-            try:
-                text = str(row[key])
-                break
-            except Exception:
-                continue
 
-    # Fallback: join string-like fields
-    if text is None:
-        parts = []
-        for k, v in row.items():
-            if isinstance(v, (str, int, float)):
-                parts.append(str(v))
-            elif isinstance(v, (list, dict)):
-                continue
-        if parts:
-            text = " ".join(parts)
+def _is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value == "")
 
+
+def extract_text_and_label(
+    row: Dict[str, Any],
+    text_column: Optional[str] = None,
+    label_column: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[Any]]:
+    """
+    Pick the sample text and label from a row.
+
+    Explicit columns win. Otherwise the first known text/label column is used, then
+    the row's scalar fields are joined, then the remaining fields are dumped as JSON.
+    Label and id columns are never folded into the text.
+    """
     label: Optional[Any] = None
-    for key in LABEL_CANDIDATE_COLUMNS:
-        if key in row and row[key] is not None:
-            label = row[key]
-            break
+    label_key: Optional[str] = None
+    if label_column:
+        label, label_key = row.get(label_column), label_column
+    else:
+        for key in LABEL_CANDIDATE_COLUMNS:
+            if row.get(key) is not None:
+                label, label_key = row[key], key
+                break
 
-    # Convert boolean-like malicious fields to 0/1
-    if label is None and "malicious" in row:
-        label = row["malicious"]
+    if text_column:
+        value = row.get(text_column)
+        return (None if _is_blank(value) else str(value)), label
 
-    return text, label
+    for key in TEXT_CANDIDATE_COLUMNS:
+        value = row.get(key)
+        if not _is_blank(value):
+            return str(value), label
+
+    # Fallback: everything except label and id columns
+    excluded = set(LABEL_CANDIDATE_COLUMNS) | ID_COLUMNS | {label_key}
+    rest = {k: v for k, v in row.items() if k not in excluded and not _is_blank(v)}
+    parts = [str(v) for v in rest.values() if isinstance(v, (str, int, float))]
+    if parts:
+        return " ".join(parts), label
+    if rest:
+        return json.dumps(rest, ensure_ascii=False, default=str), label
+    return None, label
 
 
 _SPLIT_PATTERNS = [
@@ -75,5 +90,4 @@ def infer_split_from_path(path_str: str) -> Optional[str]:
         if rx.search(path_str):
             return name
     return None
-
 

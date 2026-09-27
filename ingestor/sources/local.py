@@ -1,140 +1,69 @@
 from __future__ import annotations
 
-import csv
 import glob as pyglob
-import json
 from pathlib import Path
-from typing import Dict, Generator, Iterable
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
-import pandas as pd  # type: ignore
-import pyarrow.ipc as pa_ipc  # type: ignore
-
+from ..config import LocalOverride, glob_match, lookup
 from ..constants import STRUCTURED_EXTENSIONS, TEXT_EXTENSIONS
-from ..schema import extract_text_and_label, infer_split_from_path
+from ..logging_utils import log_warning
+from ..schema import infer_split_from_path
+from .files import file_items
 
 DATA_EXTS = STRUCTURED_EXTENSIONS | TEXT_EXTENSIONS
 
 
-def _iter_paths(pattern: str) -> Iterable[Path]:
-    for p in pyglob.glob(pattern, recursive=True):
-        pth = Path(p)
-        if pth.is_file() and pth.suffix.lower() in DATA_EXTS:
-            yield pth
+def expand_local_globs(
+    globs: Sequence[str], exclude: Sequence[Path] = ()
+) -> List[Tuple[str, List[Path]]]:
+    """Sorted data files per glob; a file matched by several globs belongs to the first.
 
-
-def iter_local(globs: list[str]) -> Generator[Dict, None, None]:
+    Files in `exclude` (e.g. the run's own output) are never read.
+    """
+    seen = {Path(p).resolve() for p in exclude}
+    expanded = []
     for pattern in globs:
-        for path in _iter_paths(pattern):
-            suffix = path.suffix.lower()
-            split = infer_split_from_path(str(path))
-            try:
-                if suffix in {".jsonl", ".ndjson"}:
-                    with path.open("r", encoding="utf-8", errors="ignore") as f:
-                        for idx, line in enumerate(f):
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                obj = json.loads(line)
-                            except Exception:
-                                obj = {"text": line}
-                            text, label = extract_text_and_label(obj)
-                            if text is None:
-                                text = json.dumps(obj, ensure_ascii=False)
-                            yield {
-                                "source": "local",
-                                "source_id": f"{path}:{idx}",
-                                "raw": str(text),
-                                "label": label,
-                                "meta": {"path": str(path), **({"split": split} if split else {})},
-                            }
-                elif suffix == ".json":
-                    obj = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-                    if isinstance(obj, list):
-                        for idx, row in enumerate(obj):
-                            if isinstance(row, dict):
-                                text, label = extract_text_and_label(row)
-                                if text is None:
-                                    text = json.dumps(row, ensure_ascii=False)
-                            else:
-                                text = str(row)
-                                label = None
-                            yield {
-                                "source": "local",
-                                "source_id": f"{path}:{idx}",
-                                "raw": str(text),
-                                "label": label,
-                                "meta": {"path": str(path), **({"split": split} if split else {})},
-                            }
-                    else:
-                        text, label = extract_text_and_label(obj)
-                        if text is None:
-                            text = json.dumps(obj, ensure_ascii=False)
-                        yield {
-                            "source": "local",
-                            "source_id": str(path),
-                            "raw": str(text),
-                            "label": label,
-                            "meta": {"path": str(path), **({"split": split} if split else {})},
-                        }
-                elif suffix in {".csv", ".tsv"}:
-                    delimiter = "," if suffix == ".csv" else "\t"
-                    with path.open("r", encoding="utf-8", errors="ignore") as f:
-                        reader = csv.DictReader(f, delimiter=delimiter)
-                        for idx, row in enumerate(reader):
-                            text, label = extract_text_and_label(row)
-                            if text is None:
-                                text = " ".join(str(v) for v in row.values())
-                            yield {
-                                "source": "local",
-                                "source_id": f"{path}:{idx}",
-                                "raw": str(text),
-                                "label": label,
-                                "meta": {"path": str(path), **({"split": split} if split else {})},
-                            }
-                elif suffix == ".parquet":
-                    df = pd.read_parquet(path)
-                    for idx, row in df.iterrows():
-                        row_dict = row.to_dict()
-                        text, label = extract_text_and_label(row_dict)
-                        if text is None:
-                            text = " ".join(str(v) for v in row_dict.values())
-                        yield {
-                            "source": "local",
-                            "source_id": f"{path}:{idx}",
-                            "raw": str(text),
-                            "label": label,
-                            "meta": {"path": str(path), **({"split": split} if split else {})},
-                        }
-                elif suffix == ".arrow":
-                    with path.open("rb") as f:
-                        try:
-                            reader2 = pa_ipc.open_file(f)
-                        except Exception:
-                            f.seek(0)
-                            reader2 = pa_ipc.open_stream(f)
-                        table = reader2.read_all()
-                    df = table.to_pandas()
-                    for idx, row in df.iterrows():
-                        row_dict = row.to_dict()
-                        text, label = extract_text_and_label(row_dict)
-                        if text is None:
-                            text = " ".join(str(v) for v in row_dict.values())
-                        yield {
-                            "source": "local",
-                            "source_id": f"{path}:{idx}",
-                            "raw": str(text),
-                            "label": label,
-                            "meta": {"path": str(path), **({"split": split} if split else {})},
-                        }
-                else:
-                    text = path.read_text(encoding="utf-8", errors="ignore")
-                    yield {
-                        "source": "local",
-                        "source_id": str(path),
-                        "raw": text,
-                        "label": None,
-                        "meta": {"path": str(path), **({"split": split} if split else {})},
-                    }
-            except Exception:
-                continue
+        files = []
+        for p in sorted(pyglob.glob(pattern, recursive=True)):
+            path = Path(p)
+            key = path.resolve()
+            if path.is_file() and path.suffix.lower() in DATA_EXTS and key not in seen:
+                seen.add(key)
+                files.append(path)
+        expanded.append((pattern, files))
+    return expanded
+
+
+def iter_local_files(
+    pattern: str,
+    files: Sequence[Path],
+    overrides: Optional[Dict[str, LocalOverride]] = None,
+) -> Iterator[Dict]:
+    """Items from the files matched by one configured glob."""
+    for path in files:
+        override = lookup(overrides or {}, [pattern], str(path))
+        if override and override.include_globs and not any(
+            glob_match(str(path), g) for g in override.include_globs
+        ):
+            continue
+        split = infer_split_from_path(str(path))
+        meta = {"path": str(path), "dataset": pattern, **({"split": split} if split else {})}
+        try:
+            yield from file_items(
+                path,
+                source="local",
+                id_prefix=str(path),
+                meta=meta,
+                spec=pattern,
+                text_column=override.text_column if override else None,
+                label_column=override.label_column if override else None,
+            )
+        except Exception as e:
+            log_warning(f"[local] skipped rest of {path}: {e}")
+
+
+def iter_local(
+    globs: Sequence[str], overrides: Optional[Dict[str, LocalOverride]] = None
+) -> Iterator[Dict]:
+    for pattern, files in expand_local_globs(globs):
+        yield from iter_local_files(pattern, files, overrides)

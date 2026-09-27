@@ -27,7 +27,7 @@ def set_verbosity(level: int) -> None:
     if level > 2:
         level = 2
     _VERBOSITY = level
-    
+
     # Always suppress HuggingFace verbose logging unless in debug mode
     if level < 2:
         _suppress_huggingface_logging()
@@ -51,8 +51,12 @@ def log_success(message: str) -> None:
         _console.print(message, style="green")
 
 
+def log_warning(message: str) -> None:
+    _console.print(message, style="yellow", markup=False)
+
+
 def log_error(message: str) -> None:
-    _console.print(message, style="red")
+    _console.print(message, style="red", markup=False)
 
 
 def log_debug(message: str) -> None:
@@ -61,6 +65,8 @@ def log_debug(message: str) -> None:
         _console.print(message, style="grey50")
 
 
-def log_summary(approved: int, rejected: int) -> None:
+def log_summary(approved: int, rejected: int, existing: int = 0) -> None:
     _console.print(f"Approved {approved}", style="green")
     _console.print(f"Rejected {rejected}", style="red")
+    if existing:
+        _console.print(f"Already ingested {existing}", style="grey50")

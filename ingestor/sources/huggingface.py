@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Dict, Generator
+from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
 from datasets import load_dataset
+from huggingface_hub import HfApi
+
+from ..logging_utils import log_debug, log_warning
+from .hf_repo import iter_hf_repo
 
 if TYPE_CHECKING:
     from ..config import IngestConfig
@@ -22,12 +26,30 @@ def _parse_hf_spec(spec: str) -> tuple[str, str | None, str | None]:
     return path, name, revision
 
 
+def _card_license(path: str, token: str | None, revision: str | None) -> Any:
+    """License declared in the dataset card (a string or a list), if the Hub reports one."""
+    try:
+        info = HfApi().dataset_info(path, revision=revision, token=token)
+    except Exception as e:
+        log_debug(f"[hf] could not read dataset card license for {path}: {e}")
+        return None
+    card = getattr(info, "card_data", None)
+    return getattr(card, "license", None) if card is not None else None
+
+
+def _info_license(ds: Any) -> str | None:
+    """License from a loaded split's builder info (often empty for Hub datasets)."""
+    lic = getattr(getattr(ds, "info", None), "license", None)
+    return str(lic) if lic else None
+
+
 def _iter_rows(
     ds,
     dataset_name: str,
-    license_id: str | None,
+    license_id: Any,
     text_col: str | None = None,
     label_col: str | None = None,
+    spec: str | None = None,
 ):
     for idx, row in enumerate(ds):
         # Use override columns if specified, otherwise fallback to defaults
@@ -56,14 +78,17 @@ def _iter_rows(
         meta = {k: v for k, v in row.items() if k not in exclude_keys}
         if license_id and "license" not in meta:
             meta["license"] = license_id
-        # Track dataset id for overrides
-        meta.setdefault("dataset", dataset_name)
+        # Track dataset id for overrides; a row's own "dataset" column must not replace it
+        if "dataset" in meta:
+            meta["row_dataset"] = meta.pop("dataset")
+        meta["dataset"] = dataset_name
         yield {
             "source": f"hf:{dataset_name}",
             "source_id": str(idx),
-            "raw": str(text),
+            "raw": "" if text is None else str(text),
             "label": label,
             "meta": meta,
+            "spec": spec or dataset_name,
         }
 
 
@@ -79,54 +104,52 @@ def iter_huggingface(
     text_col = None
     label_col = None
     split_override = None
+    license_override: Optional[str] = None
 
     if config and dataset_name in config.hf_overrides:
         override = config.hf_overrides[dataset_name]
         text_col = override.text_column
         label_col = override.label_column
         split_override = override.split
+        license_override = override.license
 
-    license_id = None
-    # NEW BEHAVIOR: By default, use ALL splits unless explicitly specified
-    # If split is explicitly specified, use only that split
+    card_license = license_override or _card_license(path, token, revision)
+
+    # By default use ALL splits; an explicit split uses only that split
     if split_override:
         try:
             ds = load_dataset(
                 path, name=name, split=split_override, token=token, revision=revision
             )
-            info = getattr(ds, "info", None)
-            if info is not None:
-                lic = getattr(info, "license", None)
-                if lic is not None:
-                    license_id = str(lic)
-            yield from _iter_rows(
-                ds, dataset_name, license_id, text_col, label_col
-            )
-            return
-        except Exception:
-            pass  # Fall through to all splits if specified split fails
+        except Exception as e:
+            raise RuntimeError(f"could not load split {split_override!r} of {dataset_name}: {e}") from e
+        yield from _iter_rows(
+            ds, dataset_name, card_license or _info_license(ds), text_col, label_col, dataset_name
+        )
+        return
 
     try:
         ds_dict = load_dataset(path, name=name, token=token, revision=revision)
-    except Exception:
+    except Exception as e:
+        log_warning(f"[hf] load_dataset failed for {dataset_name} ({e}); crawling repository files instead")
+        yield from iter_hf_repo(
+            path,
+            spec=dataset_name,
+            license_id=card_license,
+            text_column=text_col,
+            label_column=label_col,
+            token=token,
+            revision=revision,
+        )
         return
 
-    # Capture license from builder info when possible
-    try:
-        info = getattr(ds_dict, "info", None)
-        if info is not None:
-            lic = getattr(info, "license", None)
-            if lic is not None:
-                license_id = str(lic)
-    except Exception:
-        license_id = None
-
-    for split_name in getattr(ds_dict, "keys", lambda: [])():
+    for split_name in ds_dict.keys():
         split_ds = ds_dict[split_name]
         yield from _iter_rows(
             split_ds,
             f"{dataset_name}:{split_name}",
-            license_id,
+            card_license or _info_license(split_ds),
             text_col,
             label_col,
+            dataset_name,
         )

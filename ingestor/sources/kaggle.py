@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import csv
 import json
 import shutil
 import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Dict, Generator, Optional
+from typing import Dict, Iterator, List, Optional
 
-import pandas as pd  # type: ignore
-import pyarrow.ipc as pa_ipc  # type: ignore
-
-from ..constants import TEXT_EXTENSIONS
-from ..schema import extract_text_and_label
+from ..config import KaggleOverride, glob_match
+from ..constants import STRUCTURED_EXTENSIONS, TEXT_EXTENSIONS
+from ..logging_utils import log_warning
+from .files import file_items, is_crawlable_data_file
 
 
 def _unzip_all(root: Path) -> None:
@@ -25,241 +23,76 @@ def _unzip_all(root: Path) -> None:
             continue
 
 
-def _get_kaggle_license(dataset_spec: str) -> Optional[str]:
+def _run_kaggle(args: List[str]) -> subprocess.CompletedProcess:
     try:
-        res = subprocess.run(
-            ["kaggle", "datasets", "view", "-d", dataset_spec, "-v"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        out = res.stdout or ""
-        for line in out.splitlines():
-            if line.strip().startswith("License(s):"):
-                return line.split(":", 1)[1].strip()
-    except Exception:
+        return subprocess.run(["kaggle", *args], capture_output=True, text=True, check=False)
+    except FileNotFoundError as e:
+        raise RuntimeError("kaggle CLI not found; install the `kaggle` package") from e
+
+
+def _get_kaggle_license(dataset_spec: str, workdir: Path) -> Optional[str]:
+    """License name from the dataset's metadata (`kaggle datasets metadata`)."""
+    res = _run_kaggle(["datasets", "metadata", dataset_spec, "-p", str(workdir)])
+    meta_file = workdir / "dataset-metadata.json"
+    if res.returncode != 0 or not meta_file.exists():
+        log_warning(f"[kaggle] license lookup failed for {dataset_spec}: {(res.stderr or res.stdout).strip()[:200]}")
         return None
+    try:
+        data = json.loads(meta_file.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    for lic in data.get("licenses") or []:
+        if isinstance(lic, dict) and lic.get("name"):
+            return str(lic["name"])
     return None
 
 
-def _yield_from_text_file(path: Path, dataset_spec: str, license_id: Optional[str], root: Path):
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return
-    rel = path.relative_to(root)
-    yield {
-        "source": f"kaggle:{dataset_spec}",
-        "source_id": str(rel),
-        "raw": text,
-        "label": None,
-        "meta": {"path": str(rel), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-    }
-
-
-def _yield_from_jsonl(path: Path, dataset_spec: str, license_id: Optional[str], root: Path):
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            for idx, line in enumerate(f):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    obj = {"text": line}
-                text = (
-                    obj.get("text")
-                    or obj.get("prompt")
-                    or obj.get("content")
-                    or json.dumps(obj, ensure_ascii=False)
-                )
-                label = obj.get("label")
-                yield {
-                    "source": f"kaggle:{dataset_spec}",
-                    "source_id": f"{path.relative_to(root)}:{idx}",
-                    "raw": str(text),
-                    "label": label,
-                    "meta": {"path": str(path.relative_to(root)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-                }
-    except Exception:
-        return
-
-
-def _yield_from_json(path: Path, dataset_spec: str, license_id: Optional[str], root: Path):
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-    except Exception:
-        return
-    if isinstance(data, list):
-        for idx, obj in enumerate(data):
-            if isinstance(obj, dict):
-                text, label = extract_text_and_label(obj)
-                if text is None:
-                    text = json.dumps(obj, ensure_ascii=False)
-            else:
-                text = str(obj)
-                label = None
-            yield {
-                "source": f"kaggle:{dataset_spec}",
-                "source_id": f"{path.relative_to(root)}:{idx}",
-                "raw": str(text),
-                "label": label,
-                "meta": {"path": str(path.relative_to(root)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-            }
-    elif isinstance(data, dict):
-        text, label = extract_text_and_label(data)
-        if text is None:
-            text = json.dumps(data, ensure_ascii=False)
-        yield {
-            "source": f"kaggle:{dataset_spec}",
-            "source_id": str(path.relative_to(root)),
-            "raw": str(text),
-            "label": label,
-            "meta": {"path": str(path.relative_to(root)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-        }
-
-
-def _yield_from_csv(path: Path, dataset_spec: str, license_id: Optional[str], root: Path):
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            reader = csv.DictReader(f)
-            is_dict = True
-    except Exception:
-        is_dict = False
-
-    if is_dict:
+def iter_kaggle_dir(
+    root: Path,
+    dataset_spec: str,
+    license_id: Optional[str],
+    override: Optional[KaggleOverride] = None,
+) -> Iterator[Dict]:
+    """Items from a downloaded (and unzipped) Kaggle dataset directory."""
+    include = override.include_globs if override else []
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        rel = path.relative_to(root)
+        if include:
+            wanted = any(glob_match(rel.as_posix(), g) for g in include)
+            if not wanted or path.suffix.lower() not in STRUCTURED_EXTENSIONS | TEXT_EXTENSIONS:
+                continue
+        elif not is_crawlable_data_file(rel):
+            continue
+        meta = {"path": str(rel), "license": license_id or "UNKNOWN", "dataset": dataset_spec}
         try:
-            with path.open("r", encoding="utf-8", errors="ignore") as f:
-                reader = csv.DictReader(f)
-                for idx, row in enumerate(reader):
-                    text, label = extract_text_and_label(row)
-                    if text is None:
-                        text = " ".join(str(v) for v in row.values())
-                    yield {
-                        "source": f"kaggle:{dataset_spec}",
-                        "source_id": f"{path.relative_to(root)}:{idx}",
-                        "raw": str(text),
-                        "label": label,
-                        "meta": {"path": str(path.relative_to(root)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-                    }
-        except Exception:
-            return
-    else:
-        try:
-            with path.open("r", encoding="utf-8", errors="ignore") as f:
-                reader2 = csv.reader(f)
-                for idx, row_vals in enumerate(reader2):
-                    text = " ".join(str(v) for v in row_vals)
-                    yield {
-                        "source": f"kaggle:{dataset_spec}",
-                        "source_id": f"{path.relative_to(root)}:{idx}",
-                        "raw": str(text),
-                        "label": None,
-                        "meta": {"path": str(path.relative_to(root)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-                    }
-        except Exception:
-            return
+            yield from file_items(
+                path,
+                source=f"kaggle:{dataset_spec}",
+                id_prefix=str(rel),
+                meta=meta,
+                spec=dataset_spec,
+                text_column=override.text_column if override else None,
+                label_column=override.label_column if override else None,
+            )
+        except Exception as e:
+            log_warning(f"[kaggle] skipped rest of {rel} in {dataset_spec}: {e}")
 
 
-def _yield_from_parquet(path: Path, dataset_spec: str, license_id: Optional[str], root: Path):
-    try:
-        df = pd.read_parquet(path)
-    except Exception:
-        return
-    for idx, row in df.iterrows():
-        row_dict = row.to_dict()
-        text = row_dict.get("text") or row_dict.get("prompt") or row_dict.get("content")
-        if not text:
-            text = " ".join(str(v) for v in row_dict.values())
-        yield {
-            "source": f"kaggle:{dataset_spec}",
-            "source_id": f"{path.relative_to(root)}:{idx}",
-            "raw": str(text),
-            "label": row_dict.get("label"),
-            "meta": {"path": str(path.relative_to(root)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-        }
-
-
-def _yield_from_arrow(path: Path, dataset_spec: str, license_id: Optional[str], root: Path):
-    try:
-        with path.open("rb") as f:
-            try:
-                reader = pa_ipc.open_file(f)
-            except Exception:
-                f.seek(0)
-                reader = pa_ipc.open_stream(f)
-            table = reader.read_all()
-        df = table.to_pandas()
-    except Exception:
-        return
-    for idx, row in df.iterrows():
-        row_dict = row.to_dict()
-        text = row_dict.get("text") or row_dict.get("prompt") or row_dict.get("content")
-        if not text:
-            text = " ".join(str(v) for v in row_dict.values())
-        yield {
-            "source": f"kaggle:{dataset_spec}",
-            "source_id": f"{path.relative_to(root)}:{idx}",
-            "raw": str(text),
-            "label": row_dict.get("label"),
-            "meta": {"path": str(path.relative_to(root)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-        }
-
-
-def iter_kaggle(dataset_spec: str) -> Generator[Dict, None, None]:
-    # Requires KAGGLE_USERNAME / KAGGLE_KEY env vars and kaggle CLI installed
+def iter_kaggle(dataset_spec: str, override: Optional[KaggleOverride] = None) -> Iterator[Dict]:
+    # Requires KAGGLE_USERNAME / KAGGLE_KEY env vars (or ~/.kaggle/kaggle.json) and the kaggle CLI
     tmpdir = Path(tempfile.mkdtemp(prefix="ingest_kaggle_"))
     try:
-        # Download dataset (zip)
-        res = subprocess.run(
-            ["kaggle", "datasets", "download", "-d", dataset_spec, "-p", str(tmpdir), "-q"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        data_dir = tmpdir / "data"
+        data_dir.mkdir()
+        res = _run_kaggle(["datasets", "download", dataset_spec, "-p", str(data_dir), "-q"])
         if res.returncode != 0:
-            return
-
-        # Unzip all archives
-        _unzip_all(tmpdir)
-
-        license_id = _get_kaggle_license(dataset_spec)
-
-        # Iterate files
-        for path in tmpdir.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.suffix.lower() in TEXT_EXTENSIONS and path.stat().st_size < 5_000_000:
-                yield from _yield_from_text_file(path, dataset_spec, license_id, tmpdir)
-            elif path.suffix.lower() in {".jsonl", ".ndjson"}:
-                yield from _yield_from_jsonl(path, dataset_spec, license_id, tmpdir)
-            elif path.suffix.lower() == ".json":
-                yield from _yield_from_json(path, dataset_spec, license_id, tmpdir)
-            elif path.suffix.lower() == ".csv":
-                yield from _yield_from_csv(path, dataset_spec, license_id, tmpdir)
-            elif path.suffix.lower() == ".tsv":
-                # Reuse CSV handler with tab-delimited rows
-                try:
-                    with path.open("r", encoding="utf-8", errors="ignore") as f:
-                        reader = csv.DictReader(f, delimiter="\t")
-                        for idx, row in enumerate(reader):
-                            text = row.get("text") or row.get("prompt") or row.get("content")
-                            if not text:
-                                text = " ".join(str(v) for v in row.values())
-                            yield {
-                                "source": f"kaggle:{dataset_spec}",
-                                "source_id": f"{path.relative_to(tmpdir)}:{idx}",
-                                "raw": str(text),
-                                "label": row.get("label"),
-                                "meta": {"path": str(path.relative_to(tmpdir)), "license": license_id or "UNKNOWN", "dataset": dataset_spec},
-                            }
-                except Exception:
-                    pass
-            elif path.suffix.lower() == ".parquet":
-                yield from _yield_from_parquet(path, dataset_spec, license_id, tmpdir)
-            elif path.suffix.lower() == ".arrow":
-                yield from _yield_from_arrow(path, dataset_spec, license_id, tmpdir)
+            raise RuntimeError(
+                f"kaggle download failed for {dataset_spec}: {(res.stderr or res.stdout).strip()[:300]}"
+            )
+        _unzip_all(data_dir)
+        license_id = override.license if override and override.license else None
+        if license_id is None:
+            license_id = _get_kaggle_license(dataset_spec, tmpdir)
+        yield from iter_kaggle_dir(data_dir, dataset_spec, license_id, override)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-
