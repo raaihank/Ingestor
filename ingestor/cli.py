@@ -241,14 +241,14 @@ def run(
                 progress.stop_task(tid)
         # After progress ends (transient), print final per-dataset summary lines
         set_quiet(False)
-        console = Console()
+        console = Console(soft_wrap=True)
         for ds in dataset_order:
             console.print("")
             console.print(f"{ds} \u2713 {_count_line(dataset_counts[ds])}")
     else:
         for outcome in pipeline.run(out_path=out, fresh=fresh):
             _tally(outcome, dataset_counts, dataset_order)
-        console = Console()
+        console = Console(soft_wrap=True)
         for ds in dataset_order:
             console.print(f"{ds} {_count_line(dataset_counts[ds])}")
 
@@ -335,12 +335,12 @@ def verify(
     for ds, lst in samples.items():
         console.print(f"[grey50]Samples for {ds}[/grey50]")
         for i, s in enumerate(lst):
-            console.print(f"  [{i+1}] {s}", style="grey50", markup=False)
+            console.print(f"  [{i+1}] {s}", style="grey50", markup=False, soft_wrap=True)
 
     # Fail if strict errors collected
     if errors:
         for error in errors:
-            console.print(error, style="red", markup=False)
+            console.print(error, style="red", markup=False, soft_wrap=True)
         raise typer.Exit(code=1)
 
 

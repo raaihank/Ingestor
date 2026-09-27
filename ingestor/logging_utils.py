@@ -5,7 +5,8 @@ import logging
 from rich.console import Console
 
 _VERBOSITY = 0  # 0,1,2
-_console = Console()
+# soft_wrap: never insert line breaks into log lines (CI logs and redirected output)
+_console = Console(soft_wrap=True)
 _QUIET = False
 
 

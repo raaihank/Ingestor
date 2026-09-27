@@ -77,7 +77,7 @@ def jsonl(path: Path, rows: List[Dict]) -> Path:
 
 
 def run_cli(args: List[str], cwd: Path) -> subprocess.CompletedProcess:
-    env = {**os.environ, "CI": "true", "COLUMNS": "1000"}  # no line wrapping in captured output
+    env = {**os.environ, "CI": "true"}
     return subprocess.run([sys.executable, "-m", "ingestor.cli", *args], cwd=cwd,
                           capture_output=True, text=True, env=env)
 

@@ -128,3 +128,12 @@ def test_cli_verify_is_side_effect_free_and_handles_markup(tmp_path: Path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "[/INST]" in proc.stdout
     assert not (tmp_path / ".state").exists()
+
+
+def test_log_lines_are_never_hard_wrapped(capsys):
+    from ingestor.logging_utils import log_warning
+
+    # Longer than the 80 columns rich assumes when output isn't a terminal (CI logs, files)
+    message = "/" + "a" * 70 + "/data.jsonl: text column 'text' not found (columns: prompt)"
+    log_warning(message)
+    assert capsys.readouterr().out == message + "\n"
