@@ -35,9 +35,8 @@ cat test-data/unified.sample.jsonl | head -n 3
 ### Minimal YAML
 
 ```yaml
-# Auth
-hf_token: *******************
-# Models (processes ALL splits by default)
+# Auth: prefer `export HF_TOKEN=hf_...`; `hf_token: "hf_..."` also works, but keep that file out of git
+# Datasets (processes ALL splits by default)
 hf:
   - deepset/prompt-injections  # Gets train + test + validation splits
 
@@ -53,6 +52,8 @@ global_label_map:
   malicious: malicious
   benign: benign
 ```
+
+More ready-to-use configs (local files, mixed sources, license-clean, tuning): see [Config examples](#config-examples).
 
 ### Verify (dry-run)
 
@@ -131,6 +132,184 @@ Atomic JSONL with: `id`, `source`, `source_id`, `normalized_text`, `prompt_hash`
   - `state_dir` (default `.state`): where the per-output state files live
 
 Unknown config keys are rejected, so a typo can't silently disable a setting.
+
+### Config examples
+
+Copy one into a file (e.g. `my.config.yaml`), check it with `ingestor verify --config my.config.yaml`, then run `ingestor run --config my.config.yaml --out data/unified.jsonl`.
+
+- [Local files with your own columns](#local-files-with-your-own-columns)
+- [Prompt-injection corpus from Hugging Face](#prompt-injection-corpus-from-hugging-face)
+- [Mixing Hugging Face, Kaggle, Git and local sources](#mixing-hugging-face-kaggle-git-and-local-sources)
+- [License-clean corpus](#license-clean-corpus)
+- [Keep almost everything, for inspection](#keep-almost-everything-for-inspection)
+- [Tuning deduplication](#tuning-deduplication)
+- [Tuning speed](#tuning-speed)
+
+> **Quote label-map keys** such as `"1"`, `"0"`, `"true"` and `"false"`. Unquoted, YAML reads them as numbers or booleans and the config is rejected.
+
+#### Local files with your own columns
+
+Columns are auto-detected: text from `text`, `prompt`, `content`, `input`, `instruction`, `message`, `question` or `body`; label from `label`, `labels`, `target`, `class`, `category`, `injection_type`, `is_malicious`, `malicious` or `y`. Override them where your files differ.
+
+```yaml
+local:
+  - "data/raw/**/*.jsonl"
+  - "data/raw/**/*.csv"
+  - "data/raw/support_tickets/*.parquet"
+
+allowed_languages: [en]
+
+local_overrides:
+  # Keys are one of the globs above or any path glob
+  "data/raw/support_tickets/**":
+    text_column: body_text    # use this column instead of auto-detection
+    label_column: is_attack   # true/false values
+    category: support_tickets
+
+global_label_map:
+  "true": malicious
+  "false": benign
+  "1": malicious
+  "0": benign
+```
+
+#### Prompt-injection corpus from Hugging Face
+
+Hugging Face rows use the `text`, `prompt` or `content` column and the `label` column unless overridden. Gated datasets need `HF_TOKEN`.
+
+```yaml
+hf:
+  - deepset/prompt-injections                      # text, label (0/1)
+  - qualifire/prompt-injections-benchmark          # text, label (jailbreak/benign)
+  - hackaprompt/hackaprompt-dataset                # injection attempts from the HackAPrompt competition
+  - Necent/llm-jailbreak-prompt-injection-dataset  # prompt, is_dangerous (0/1)
+
+allowed_languages: [en]
+language_confidence: 0.7
+min_entropy: 1.5   # short attacks have low entropy
+min_length: 5
+max_length: 50000
+
+hf_overrides:
+  deepset/prompt-injections:
+    category: prompt_injection
+  qualifire/prompt-injections-benchmark:
+    category: prompt_injection
+  hackaprompt/hackaprompt-dataset:
+    text_column: user_input   # "prompt" is the full prompt: the level's template plus the input
+    label_column: correct
+    category: prompt_injection
+  Necent/llm-jailbreak-prompt-injection-dataset:
+    label_column: is_dangerous   # this dataset has no "label" column
+
+global_label_map:
+  "1": malicious
+  "0": benign
+  jailbreak: malicious
+  benign: benign
+
+hf_label_maps:
+  hackaprompt/hackaprompt-dataset:
+    # Every row is an injection attempt; "correct" only says whether it succeeded
+    "true": malicious
+    "false": malicious
+```
+
+#### Mixing Hugging Face, Kaggle, Git and local sources
+
+Sources download in parallel and are processed in the order listed. Kaggle needs `KAGGLE_USERNAME` and `KAGGLE_KEY`.
+
+```yaml
+hf:
+  - deepset/prompt-injections
+  - "owner/dataset:config@v1.0"   # optional config name and revision
+kaggle:
+  - owner/kaggle-dataset
+git:
+  - https://github.com/owner/prompt-corpus.git   # structured data files only (.jsonl/.json/.csv/.tsv/.parquet/.arrow)
+local:
+  - "data/in-house/*.jsonl"
+
+hf_overrides:
+  "owner/dataset:config@v1.0":
+    split: train            # only this split (default: all splits)
+    text_column: question
+
+kaggle_overrides:
+  owner/kaggle-dataset:
+    include_globs: ["**/*.csv", "*.txt"]   # only these files; .txt files become one sample each
+    text_column: prompt
+    label_column: class
+    category: prompt_injection
+
+global_label_map:
+  "1": malicious
+  "0": benign
+```
+
+#### License-clean corpus
+
+With `enforce_license`, only MIT, Apache-2.0, BSD-3-Clause, CC0-1.0, CC-BY-4.0, CC-BY-SA-4.0 and Unlicense data is kept (spelling variants like `apache-2.0` or `CC0: Public Domain` are recognized); everything else is rejected with reason `license`.
+
+```yaml
+enforce_license: true
+
+hf:
+  - deepset/prompt-injections                    # license read from the dataset card (cc-by-4.0)
+  - owner/dataset-without-a-card-license
+git:
+  - https://github.com/owner/prompt-corpus.git   # license detected from its LICENSE file
+local:
+  - "data/in-house/*.jsonl"
+
+hf_overrides:
+  owner/dataset-without-a-card-license:
+    license: apache-2.0   # only if you checked the license yourself
+local_overrides:
+  "data/in-house/*.jsonl":
+    license: MIT          # local files carry no license; declare it
+```
+
+#### Keep almost everything, for inspection
+
+Turns the quality filters off to see what a source contains. Exact duplicates are still dropped.
+
+```yaml
+local:
+  - "data/raw/**/*.jsonl"
+
+store_raw: true                # keep the original text next to normalized_text
+allowed_languages: ["*"]
+language_confidence: 0.0       # accept any detected language
+min_entropy: 0.0
+min_length: 1
+max_length: 1000000
+near_duplicate_threshold: 1.0  # only drop texts whose MinHash signatures are identical
+```
+
+#### Tuning deduplication
+
+Add any of these to a config. After changing them for an existing output, run once with `--fresh`: earlier decisions are otherwise kept.
+
+```yaml
+near_duplicate_threshold: 0.85    # one fixed threshold; leave unset for length-aware 0.95 / 0.91 / 0.89
+near_dup_num_perm: 128            # fewer permutations: faster, slightly less precise
+near_dup_memory_limit: 200000     # signatures kept in memory; the oldest are evicted
+preserve_evasion_variants: false  # collapse homoglyph / zero-width / BiDi variants into one record
+enable_duplicate_logging: false   # skip the duplicate_log audit table
+```
+
+#### Tuning speed
+
+Add any of these to a config; `ingestor tune` suggests values for your machine.
+
+```yaml
+io_workers: 8                          # sources downloaded in parallel
+cpu_workers: 15                        # worker processes for normalization, filters, language detection and MinHash (1 = in-process)
+batch_size: 512                        # texts per worker batch
+fasttext_lid_path: /models/lid.176.bin # faster language detection; default ./lid.176.bin (see `make setup-fasttext`)
+state_dir: /mnt/nvme/ingestor-state    # resumable state on a fast disk
+```
 
 ### Logging UX
 
