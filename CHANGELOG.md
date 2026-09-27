@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor release can include
 breaking changes; they are listed under **Changed (breaking)**.
 
+## [0.2.1] - 2026-09-27
+
+### Added
+
+- A "Config examples" section in the README with ready-to-use configs: local files with your own
+  columns, a prompt-injection corpus from Hugging Face, mixed sources, a license-clean corpus,
+  keeping almost everything for inspection, and tuning de-duplication and speed.
+
+### Fixed
+
+- The README's "Minimal YAML" example failed to load when copied, because of its
+  `hf_token: ***` placeholder.
+
 ## [0.2.0] - 2026-09-27
 
 This release makes resuming, de-duplication and the configuration work as documented.
@@ -87,5 +100,6 @@ This release makes resuming, de-duplication and the configuration work as docume
 - Parallel loading and processing, and atomic JSONL output.
 - CI workflows for build, tests and security scans.
 
+[0.2.1]: https://github.com/raaihank/Ingestor/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/raaihank/Ingestor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/raaihank/Ingestor/releases/tag/v0.1.0
