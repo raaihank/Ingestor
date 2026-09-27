@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor release can include
 breaking changes; they are listed under **Changed (breaking)**.
 
+## [0.4.2] - 2026-09-27
+
+### Fixed
+
+- When output isn't a terminal (CI logs, output redirected to a file), long log messages and
+  summary lines were broken across lines, splitting messages at a long file path. They now stay
+  on one line.
+- A test failed in CI because its result depended on the length of the temporary directory path.
+
 ## [0.4.1] - 2026-09-27
 
 ### Fixed
@@ -153,6 +162,7 @@ This release makes resuming, de-duplication and the configuration work as docume
 - Parallel loading and processing, and atomic JSONL output.
 - CI workflows for build, tests and security scans.
 
+[0.4.2]: https://github.com/raaihank/Ingestor/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/raaihank/Ingestor/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/raaihank/Ingestor/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/raaihank/Ingestor/compare/v0.2.1...v0.3.0
